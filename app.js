@@ -6,6 +6,7 @@ const UUIDS = {
 
 const state = {
   connected: false,
+  reconnecting: false,
   demo: false,
   mode: "atlas",
   aps: new Map(),
@@ -41,32 +42,118 @@ class SpecterBLE {
   command = null;
   telemetry = null;
   input = "";
+  connecting = false;
+  reconnectTimer = null;
+  reconnectAttempt = 0;
+  disconnectListener = () => this.onDisconnect();
+  telemetryListener = (event) => this.receive(event.target.value);
 
   async connect() {
     if (!navigator.bluetooth) throw new Error("Web Bluetooth is unavailable. On iPhone, open this page in Bluefy.");
-    this.device = await navigator.bluetooth.requestDevice({
-      filters: [{ services: [UUIDS.service] }, { namePrefix: "SPECTER" }],
-      optionalServices: [UUIDS.service],
-    });
-    this.device.addEventListener("gattserverdisconnected", () => this.onDisconnect());
-    const server = await this.device.gatt.connect();
-    const service = await server.getPrimaryService(UUIDS.service);
-    this.command = await service.getCharacteristic(UUIDS.command);
-    this.telemetry = await service.getCharacteristic(UUIDS.telemetry);
-    await this.telemetry.startNotifications();
-    this.telemetry.addEventListener("characteristicvaluechanged", (event) => this.receive(event.target.value));
-    state.connected = true;
-    state.demo = false;
-    clearInterval(demoTimer);
+    if (!this.device) {
+      this.setDevice(await navigator.bluetooth.requestDevice({
+        filters: [{ services: [UUIDS.service] }, { namePrefix: "SPECTER" }],
+        optionalServices: [UUIDS.service],
+      }));
+    }
+    await this.connectDevice();
+  }
+
+  setDevice(device) {
+    if (this.device) this.device.removeEventListener("gattserverdisconnected", this.disconnectListener);
+    this.device = device;
+    this.device.addEventListener("gattserverdisconnected", this.disconnectListener);
+    try { localStorage.setItem("specter-device-id", device.id); } catch {}
+  }
+
+  async connectDevice() {
+    if (!this.device || this.connecting || state.connected) return;
+    this.connecting = true;
+    this.clearReconnectTimer();
+    state.reconnecting = true;
     updateConnection();
-    await this.send({ cmd: "hello" });
-    await this.send({ cmd: "scan" });
+    try {
+      const server = this.device.gatt.connected ? this.device.gatt : await this.device.gatt.connect();
+      const service = await server.getPrimaryService(UUIDS.service);
+      this.command = await service.getCharacteristic(UUIDS.command);
+      this.telemetry = await service.getCharacteristic(UUIDS.telemetry);
+      await this.telemetry.startNotifications();
+      this.telemetry.addEventListener("characteristicvaluechanged", this.telemetryListener);
+      state.connected = true;
+      state.reconnecting = false;
+      state.demo = false;
+      this.reconnectAttempt = 0;
+      clearInterval(demoTimer);
+      updateConnection();
+      await this.send({ cmd: "hello" });
+      await this.send({ cmd: "scan" });
+    } catch (error) {
+      state.connected = false;
+      state.reconnecting = Boolean(this.device);
+      this.command = null;
+      this.telemetry = null;
+      updateConnection();
+      throw error;
+    } finally {
+      this.connecting = false;
+      if (!state.connected && this.device) this.scheduleReconnect();
+    }
+  }
+
+  clearReconnectTimer() {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
+  scheduleReconnect(delay) {
+    if (!this.device || state.connected || this.connecting || this.reconnectTimer) return;
+    state.reconnecting = true;
+    updateConnection();
+    const wait = delay ?? Math.min(1000 * (2 ** this.reconnectAttempt), 15000);
+    this.reconnectAttempt += 1;
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
+      if (document.visibilityState === "hidden") return this.scheduleReconnect(1500);
+      try {
+        await this.connectDevice();
+        toast("SPECTER reconnected");
+      } catch (error) {
+        console.warn("SPECTER reconnect failed", error);
+        this.scheduleReconnect();
+      }
+    }, wait);
+  }
+
+  async restore() {
+    if (!navigator.bluetooth?.getDevices) return;
+    try {
+      const devices = await navigator.bluetooth.getDevices();
+      const remembered = localStorage.getItem("specter-device-id");
+      const device = devices.find((item) => item.id === remembered) || devices.find((item) => item.name?.startsWith("SPECTER"));
+      if (device) {
+        this.setDevice(device);
+        this.scheduleReconnect(100);
+      }
+    } catch (error) {
+      console.warn("SPECTER permission restore unavailable", error);
+    }
+  }
+
+  foreground() {
+    if (this.device && !state.connected) {
+      this.clearReconnectTimer();
+      this.scheduleReconnect(0);
+    }
   }
 
   onDisconnect() {
     state.connected = false;
+    state.reconnecting = true;
+    this.command = null;
+    this.telemetry = null;
     updateConnection();
-    toast("SPECTER disconnected");
+    toast("SPECTER link lost — reconnecting");
+    this.scheduleReconnect(700);
   }
 
   receive(value) {
@@ -99,6 +186,10 @@ function updateConnection() {
     indicator.textContent = "C5 CONNECTED";
     indicator.classList.add("online");
     $("#connectButton").textContent = "Connected";
+  } else if (state.reconnecting) {
+    indicator.textContent = "RECONNECTING";
+    indicator.classList.remove("online");
+    $("#connectButton").textContent = "Reconnecting…";
   } else if (state.demo) {
     indicator.textContent = "SIMULATION";
     indicator.classList.add("online");
@@ -425,6 +516,9 @@ $("#settingsForm").addEventListener("submit", async (event) => {
 });
 
 window.addEventListener("resize", () => requestAnimationFrame(renderAll));
+window.addEventListener("focus", () => ble.foreground());
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") ble.foreground(); });
 setInterval(() => { if (state.mode === "atlas") renderRadar(); }, 2000);
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => {});
+ble.restore();
 updateConnection(); renderAll();
