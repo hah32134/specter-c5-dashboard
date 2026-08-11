@@ -45,7 +45,7 @@ class SpecterBLE {
   async connect() {
     if (!navigator.bluetooth) throw new Error("Web Bluetooth is unavailable. On iPhone, open this page in Bluefy.");
     this.device = await navigator.bluetooth.requestDevice({
-      filters: [{ services: [UUIDS.service] }],
+      filters: [{ services: [UUIDS.service] }, { namePrefix: "SPECTER" }],
       optionalServices: [UUIDS.service],
     });
     this.device.addEventListener("gattserverdisconnected", () => this.onDisconnect());
