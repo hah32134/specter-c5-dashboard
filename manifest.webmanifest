@@ -1,0 +1,9 @@
+{
+  "name": "SPECTER C5",
+  "short_name": "SPECTER",
+  "description": "Wireless explorer, network field lab, and interference sentinel.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#070b0d",
+  "theme_color": "#070b0d"
+}

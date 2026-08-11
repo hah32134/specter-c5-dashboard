@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#070b0d">
+  <meta name="description" content="SPECTER C5 wireless explorer, network field lab, and interference sentinel.">
+  <title>SPECTER C5</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="noise" aria-hidden="true"></div>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div><strong>SPECTER</strong><small>C5 FIELD INSTRUMENT</small></div>
+    </div>
+    <div class="connection-cluster">
+      <span id="connectionState" class="state-dot">OFFLINE</span>
+      <button id="connectButton" class="button primary">Connect C5</button>
+      <button id="demoButton" class="button ghost">Demo</button>
+      <button id="settingsButton" class="icon-button" aria-label="Open settings">⚙</button>
+    </div>
+  </header>
+
+  <main>
+    <nav class="mode-tabs" aria-label="SPECTER mode">
+      <button class="mode-tab active" data-mode="atlas"><span>01</span>Atlas</button>
+      <button class="mode-tab" data-mode="lab"><span>02</span>Air Lab</button>
+      <button class="mode-tab" data-mode="sentinel"><span>03</span>Sentinel</button>
+    </nav>
+
+    <section id="atlasPanel" class="mode-panel active" aria-labelledby="atlasTitle">
+      <div class="hero-grid">
+        <article class="instrument radar-card">
+          <div class="card-heading">
+            <div><p class="eyebrow">LIVE FIELD</p><h1 id="atlasTitle">Ghost Atlas</h1></div>
+            <button id="scanButton" class="button compact">Pulse scan</button>
+          </div>
+          <div class="radar-wrap">
+            <canvas id="radarCanvas" width="720" height="720" aria-label="Live wireless signal radar"></canvas>
+            <div class="radar-center"><span></span></div>
+            <div class="sweep"></div>
+          </div>
+          <div class="legend"><span class="two">2.4 GHz</span><span class="five">5 GHz</span><span class="known">Familiar</span></div>
+        </article>
+
+        <div class="side-stack">
+          <article class="instrument atmosphere-card">
+            <p class="eyebrow">ATMOSPHERE</p>
+            <div id="atmosphere" class="atmosphere">DORMANT</div>
+            <div class="metric-row"><span>Observed</span><strong id="observedCount">0</strong></div>
+            <div class="metric-row"><span>2.4 / 5 GHz</span><strong><span id="count2g">0</span> / <span id="count5g">0</span></strong></div>
+            <div class="metric-row"><span>Strongest</span><strong id="strongestSignal">—</strong></div>
+          </article>
+
+          <article class="instrument gps-card">
+            <div class="card-heading"><div><p class="eyebrow">TRAIL</p><h2>Position memory</h2></div><button id="gpsButton" class="button compact">Start GPS</button></div>
+            <canvas id="trailCanvas" width="640" height="280" aria-label="GPS trail colored by wireless change"></canvas>
+            <div class="metric-row"><span>Accuracy</span><strong id="gpsAccuracy">—</strong></div>
+            <div class="metric-row"><span>Samples</span><strong id="gpsSamples">0</strong></div>
+          </article>
+        </div>
+      </div>
+
+      <article class="instrument table-card">
+        <div class="card-heading"><div><p class="eyebrow">RECENT CONTACTS</p><h2>Signals in range</h2></div><button id="exportButton" class="button ghost compact">Export JSON</button></div>
+        <div class="signal-table-wrap">
+          <table class="signal-table"><thead><tr><th>Signal</th><th>Band</th><th>Channel</th><th>Strength</th><th>Last seen</th></tr></thead><tbody id="signalRows"><tr class="empty-row"><td colspan="5">Connect SPECTER or enter demo mode.</td></tr></tbody></table>
+        </div>
+      </article>
+    </section>
+
+    <section id="labPanel" class="mode-panel" aria-labelledby="labTitle">
+      <div class="section-heading"><p class="eyebrow">NETWORK DIAGNOSTICS</p><h1 id="labTitle">Air Lab</h1><p>Separate radio problems from router, DNS, and internet failures.</p></div>
+      <div class="diagnostic-grid">
+        <article class="instrument diagnostic"><span class="diag-icon">RF</span><p>Router link</p><strong id="routerDiag">UNKNOWN</strong><small id="routerDetail">Waiting for telemetry</small></article>
+        <article class="instrument diagnostic"><span class="diag-icon">GW</span><p>Gateway</p><strong id="gatewayDiag">UNKNOWN</strong><small>Local network path</small></article>
+        <article class="instrument diagnostic"><span class="diag-icon">DN</span><p>DNS</p><strong id="dnsDiag">UNKNOWN</strong><small>Name resolution</small></article>
+        <article class="instrument diagnostic"><span class="diag-icon">IN</span><p>Internet</p><strong id="internetDiag">UNKNOWN</strong><small>External TCP probe</small></article>
+      </div>
+      <div class="lab-grid">
+        <article class="instrument channel-card"><div class="card-heading"><div><p class="eyebrow">OCCUPANCY PROXY</p><h2>Channels</h2></div><div class="segmented"><button class="active" data-band="2">2.4</button><button data-band="5">5</button></div></div><canvas id="channelCanvas" width="900" height="400" aria-label="Observed Wi-Fi networks by channel"></canvas></article>
+        <article class="instrument link-card"><p class="eyebrow">CURRENT LINK</p><div class="signal-number"><strong id="currentRssi">—</strong><span>dBm</span></div><div class="meter"><span id="rssiMeter"></span></div><div class="metric-row"><span>Channel</span><strong id="currentChannel">—</strong></div><div class="metric-row"><span>Assessment</span><strong id="linkAssessment">NO DATA</strong></div></article>
+      </div>
+    </section>
+
+    <section id="sentinelPanel" class="mode-panel" aria-labelledby="sentinelTitle">
+      <div class="section-heading sentinel-heading">
+        <div><p class="eyebrow">DEFENSIVE MONITORING</p><h1 id="sentinelTitle">Sentinel</h1><p>Detects suspicious interference patterns without claiming more than the evidence supports.</p></div>
+        <label class="arm-control"><input id="sentinelToggle" type="checkbox"><span></span><b>ARM SENTINEL</b></label>
+      </div>
+      <div class="sentinel-grid">
+        <article class="instrument threat-card">
+          <div class="score-ring" id="scoreRing"><div><strong id="threatScore">0</strong><span>/100</span></div></div>
+          <div><p class="eyebrow">CURRENT ASSESSMENT</p><h2 id="classification">NOT ARMED</h2><p id="classificationDetail">Configure Wi-Fi and the cloud heartbeat, then arm Sentinel.</p></div>
+        </article>
+        <article class="instrument evidence-card">
+          <p class="eyebrow">EVIDENCE WINDOW</p>
+          <div class="evidence"><span>Beacon timeouts</span><strong id="beaconEvidence">0</strong></div>
+          <div class="evidence"><span>Deauth / disassoc</span><strong id="deauthEvidence">0</strong></div>
+          <div class="evidence"><span>Disconnects</span><strong id="disconnectEvidence">0</strong></div>
+          <div class="evidence"><span>Networks visible</span><strong id="networkEvidence">0</strong></div>
+          <div class="evidence"><span>Cloud heartbeat</span><strong id="heartbeatEvidence">UNSET</strong></div>
+        </article>
+      </div>
+      <article class="instrument timeline-card"><div class="card-heading"><div><p class="eyebrow">INCIDENT TIMELINE</p><h2>Evidence log</h2></div><button id="notificationButton" class="button ghost compact">Enable phone alerts</button></div><ol id="incidentTimeline" class="timeline"><li><time>—</time><div><strong>Sentinel waiting</strong><p>No evidence has been recorded in this session.</p></div></li></ol></article>
+    </section>
+  </main>
+
+  <dialog id="settingsDialog">
+    <form id="settingsForm" method="dialog">
+      <div class="dialog-heading"><div><p class="eyebrow">DEVICE CONFIGURATION</p><h2>Configure SPECTER</h2></div><button value="cancel" class="icon-button" aria-label="Close">×</button></div>
+      <fieldset><legend>Home Wi-Fi</legend><label>Network name<input name="ssid" maxlength="32" autocomplete="off"></label><label>Password<input name="password" type="password" maxlength="64" autocomplete="new-password"></label></fieldset>
+      <fieldset><legend>Cloudflare Sentinel</legend><label>Worker URL<input name="worker_url" type="url" placeholder="https://your-worker.workers.dev"></label><label>Device ID<input name="device_id" value="specter-home" maxlength="32"></label><label>Device token<input name="device_token" type="password" maxlength="96" autocomplete="new-password"></label><div class="form-pair"><label>Alert threshold<input name="alert_threshold" type="number" min="30" max="100" value="70"></label><label>Heartbeat seconds<input name="heartbeat_seconds" type="number" min="15" max="300" value="30"></label></div></fieldset>
+      <p class="privacy-note">Credentials are sent directly to the connected C5 over BLE. This page does not save the Wi-Fi password or device token.</p>
+      <div class="dialog-actions"><button value="cancel" class="button ghost">Cancel</button><button id="saveSettings" value="default" class="button primary">Send to C5</button></div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
