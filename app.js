@@ -6,6 +6,7 @@ const UUIDS = {
 
 const state = {
   connected: false,
+  authenticated: false,
   reconnecting: false,
   demo: false,
   mode: "atlas",
@@ -13,6 +14,9 @@ const state = {
   bleDevices: new Map(),
   trail: [],
   incidents: [],
+  setupAps: new Map(),
+  security: { claimed: false, claimWindow: false, nonce: "" },
+  map: { active: false, checkpoint: false, x: .5, y: .5, heading: 0, steps: 0, confidence: 0, samples: [], floorPlan: null, lastStep: 0, lastSample: 0, lastProbe: 0 },
   gpsWatch: null,
   gpsAccuracy: null,
   lastGpsIds: new Set(),
@@ -85,16 +89,13 @@ class SpecterBLE {
       await this.telemetry.startNotifications();
       this.telemetry.addEventListener("characteristicvaluechanged", this.telemetryListener);
       state.connected = true;
+      state.authenticated = false;
       state.reconnecting = false;
       state.demo = false;
       this.reconnectAttempt = 0;
       clearInterval(demoTimer);
       updateConnection();
       await this.send({ cmd: "hello" });
-      if (!this.initialScanSent) {
-        this.initialScanSent = true;
-        await this.send({ cmd: "scan" });
-      }
     } catch (error) {
       state.connected = false;
       state.reconnecting = Boolean(this.device);
@@ -156,6 +157,7 @@ class SpecterBLE {
 
   onDisconnect() {
     state.connected = false;
+    state.authenticated = false;
     state.reconnecting = true;
     this.command = null;
     this.telemetry = null;
@@ -191,7 +193,7 @@ const ble = new SpecterBLE();
 function updateConnection() {
   const indicator = $("#connectionState");
   if (state.connected) {
-    indicator.textContent = "C5 CONNECTED";
+    indicator.textContent = state.authenticated ? "C5 SECURE" : "C5 LOCKED";
     indicator.classList.add("online");
     $("#connectButton").textContent = "Connected";
   } else if (state.reconnecting) {
@@ -209,13 +211,63 @@ function updateConnection() {
   }
 }
 
+function bytesToHex(bytes) { return [...bytes].map((value) => value.toString(16).padStart(2, "0")).join(""); }
+async function hmacHex(keyText, material) {
+  const key = await crypto.subtle.importKey("raw", encoder.encode(keyText), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return bytesToHex(new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(material))));
+}
+async function authenticate(message) {
+  state.security = { claimed: Boolean(message.claimed), claimWindow: Boolean(message.claim_window), nonce: message.nonce || "" };
+  const ownerKey = localStorage.getItem("specter-owner-key");
+  if (ownerKey && message.nonce) {
+    const proof = await hmacHex(ownerKey, `specter-auth:${message.nonce}`);
+    await ble.send({ cmd: "auth", proof });
+    $("#ownerState").textContent = "AUTHENTICATING SAVED OWNER";
+  } else {
+    $("#ownerState").textContent = message.claim_window ? "PHYSICAL WINDOW OPEN" : "WAITING FOR PHYSICAL BUTTON";
+    $("#ownerClaim").disabled = !message.claim_window;
+    if (!$("#ownerDialog").open) $("#ownerDialog").showModal();
+  }
+}
+
+async function finishAuthentication() {
+  state.authenticated = true;
+  if ($("#ownerDialog").open) $("#ownerDialog").close();
+  updateConnection();
+  toast("Owner authentication verified");
+  if (!ble.initialScanSent) { ble.initialScanSent = true; await ble.send({ cmd: "scan" }); }
+}
+
 function handleTelemetry(message) {
-  if (message.t === "ap") {
+  if (message.t === "security" || message.t === "claim_window") {
+    authenticate(message).catch((error) => toast(error.message));
+  } else if (message.t === "authenticated") {
+    finishAuthentication().catch((error) => toast(error.message));
+  } else if (message.t === "claimed") {
+    finishAuthentication().catch((error) => toast(error.message));
+  } else if (message.t === "auth_failed") {
+    state.authenticated = false;
+    localStorage.removeItem("specter-owner-key");
+    $("#ownerState").textContent = "OWNER KEY REJECTED — PRESS BOOT TO REAUTHORIZE";
+    $("#ownerClaim").disabled = true;
+    if (!$("#ownerDialog").open) $("#ownerDialog").showModal();
+  } else if (message.t === "claim_denied") {
+    localStorage.removeItem("specter-owner-key");
+    $("#ownerState").textContent = `CLAIM DENIED: ${String(message.reason || "unknown").replaceAll("_", " ").toUpperCase()}`;
+  } else if (message.t === "ownership_reset") {
+    localStorage.removeItem("specter-owner-key"); state.authenticated = false; $("#ownerClaim").disabled = false;
+  } else if (message.t === "ap") {
     state.aps.set(message.id, { ...message, lastSeen: Date.now() });
     saveObservation({ kind: "ap", at: Date.now(), ...message });
   } else if (message.t === "ble") {
     state.bleDevices.set(message.id, { ...message, lastSeen: Date.now() });
     saveObservation({ kind: "ble", at: Date.now(), ...message });
+  } else if (message.t === "setup_ap") {
+    state.setupAps.set(message.id, message); renderSetupNetworks();
+  } else if (message.t === "setup_scan_started") {
+    state.setupAps.clear(); $("#setupNetworkList").innerHTML = "<p>Scanning all supported channels…</p>"; $("#setupScanButton").disabled = true;
+  } else if (message.t === "setup_scan_complete") {
+    $("#setupScanButton").disabled = false; renderSetupNetworks(); toast(`Found ${message.count || state.setupAps.size} access points`);
   } else if (message.t === "scan_queued") {
     Object.assign(state.scan, { active: true, done: 0, total: 0, phase: "queued" });
     renderScanState();
@@ -255,6 +307,9 @@ function handleTelemetry(message) {
     Object.assign(state.status, message);
     renderAll();
     if (message.score >= 70 && previous < 70) addIncident(message);
+    maybeCaptureMapSample();
+  } else if (message.t === "probe_result") {
+    state.status.probe_kbps = message.kbps || 0; renderLab(); maybeCaptureMapSample(true);
   } else if (message.t === "configured") {
     $("#heartbeatEvidence").textContent = "CONFIGURED";
     toast("Configuration stored on SPECTER");
@@ -278,8 +333,17 @@ function renderScanState() {
   else label.textContent = "READY";
 }
 
+function renderSetupNetworks() {
+  const holder = $("#setupNetworkList");
+  const networks = [...state.setupAps.values()].filter((ap) => ap.ssid?.trim()).sort((a, b) => b.rssi - a.rssi);
+  if (!networks.length) { holder.innerHTML = "<p>No named networks found. You can still type a hidden SSID manually.</p>"; return; }
+  holder.innerHTML = networks.map((ap) => `<div class="network-option"><div><b>${escapeHtml(ap.ssid)}</b><small>${ap.band === 5 ? "5" : "2.4"} GHz · ch ${ap.channel} · ${ap.rssi} dBm</small></div><button type="button" class="button ghost" data-pick-primary="${escapeHtml(ap.id)}">Primary</button><button type="button" class="button ghost" data-pick-backup="${escapeHtml(ap.id)}">Backup</button></div>`).join("");
+  holder.querySelectorAll("[data-pick-primary]").forEach((button) => button.addEventListener("click", () => { $("#settingsForm").elements.ssid.value = state.setupAps.get(button.dataset.pickPrimary)?.ssid || ""; }));
+  holder.querySelectorAll("[data-pick-backup]").forEach((button) => button.addEventListener("click", () => { $("#settingsForm").elements.backup_ssid.value = state.setupAps.get(button.dataset.pickBackup)?.ssid || ""; }));
+}
+
 function modeName(value) {
-  return typeof value === "number" ? ["atlas", "lab", "sentinel"][value] : value;
+  return typeof value === "number" ? ["atlas", "lab", "sentinel", "mapper"][value] : value;
 }
 
 async function setMode(mode) {
@@ -287,7 +351,7 @@ async function setMode(mode) {
   $$(".mode-tab").forEach((button) => button.classList.toggle("active", button.dataset.mode === mode));
   $$(".mode-panel").forEach((panel) => panel.classList.remove("active"));
   $(`#${mode}Panel`).classList.add("active");
-  if (state.connected) await ble.send({ cmd: "mode", value: mode });
+  if (state.connected && state.authenticated && mode !== "mapper") await ble.send({ cmd: "mode", value: mode });
   requestAnimationFrame(renderAll);
 }
 
@@ -381,16 +445,25 @@ function renderAtlas() {
   if (!aps.length && !bleDevices.length) {
     rows.innerHTML = '<tr class="empty-row"><td colspan="5">Connect SPECTER or enter demo mode.</td></tr>';
   } else {
-    const wifiRows = aps.slice(0, 24).map((ap) => {
+    const hidden = aps.filter((ap) => !ap.ssid?.trim());
+    const visible = aps.filter((ap) => ap.ssid?.trim());
+    const groupedHidden = new Set();
+    const companions = new Map();
+    for (const signal of hidden) {
+      const likely = visible.find((candidate) => candidate.channel === signal.channel && Math.abs(candidate.rssi - signal.rssi) <= 5 && Math.abs(candidate.lastSeen - signal.lastSeen) <= 15000);
+      if (likely) { groupedHidden.add(signal.id); companions.set(likely.id, (companions.get(likely.id) || 0) + 1); }
+    }
+    const wifiRows = aps.filter((ap) => !groupedHidden.has(ap.id)).slice(0, 24).map((ap) => {
       const strength = Math.max(3, Math.min(100, (ap.rssi + 100) * 1.43));
       const age = Math.max(0, Math.floor((Date.now() - ap.lastSeen) / 1000));
-      const label = ap.ssid?.trim() || `ghost-${ap.id.slice(0, 6)}`;
-      return `<tr><td>${escapeHtml(label)} <small>${escapeHtml(ap.id.slice(0, 8))}</small></td><td><span class="band-pill ${ap.band === 5 ? "five" : ""}">${ap.band === 5 ? "5" : "2.4"}</span></td><td>${ap.channel}</td><td><span class="strength-bar"><i style="width:${strength}%"></i></span>${ap.rssi}</td><td>${age}s</td></tr>`;
+      const label = ap.ssid?.trim() || "Hidden signal";
+      const companion = companions.get(ap.id) ? ` <small>+${companions.get(ap.id)} likely hidden companion</small>` : "";
+      return `<tr><td>${escapeHtml(label)}${companion} <small>${escapeHtml(ap.id.slice(0, 8))}</small></td><td><span class="band-pill ${ap.band === 5 ? "five" : ""}">${ap.band === 5 ? "5" : "2.4"}</span></td><td>${ap.channel}</td><td><span class="strength-bar"><i style="width:${strength}%"></i></span>${ap.rssi}</td><td>${age}s</td></tr>`;
     });
     const bleRows = bleDevices.slice(0, 12).map((device) => {
       const strength = Math.max(3, Math.min(100, (device.rssi + 100) * 1.43));
       const age = Math.max(0, Math.floor((Date.now() - device.lastSeen) / 1000));
-      const label = device.name?.trim() || `ble-ghost-${device.id.slice(0, 6)}`;
+      const label = device.name?.trim() || "Unnamed BLE signal";
       return `<tr><td>${escapeHtml(label)} <small>${escapeHtml(device.id.slice(0, 8))}</small></td><td><span class="band-pill ble-band">BLE</span></td><td>—</td><td><span class="strength-bar"><i style="width:${strength}%"></i></span>${device.rssi}</td><td>${age}s</td></tr>`;
     });
     rows.innerHTML = [...wifiRows, ...bleRows].join("");
@@ -420,6 +493,11 @@ function renderLab() {
   $("#routerDetail").textContent = status.wifi ? `${status.rssi} dBm on channel ${status.channel}` : "No active association";
   $("#currentRssi").textContent = hasData && status.rssi > -127 ? status.rssi : "—";
   $("#currentChannel").textContent = status.channel || "—";
+  $("#activeProfile").textContent = hasData ? (Number(status.active_profile) === 1 ? "BACKUP" : "PRIMARY") : "—";
+  $("#linkLatency").textContent = hasData ? `${status.dns_ms || 0} / ${status.internet_ms || 0} ms` : "—";
+  $("#probeSpeed").textContent = status.probe_kbps ? `${status.probe_kbps} kbps` : "NOT RUN";
+  $("#chipTemperature").textContent = Number.isFinite(Number(status.temperature_c)) ? `${Number(status.temperature_c).toFixed(1)} °C internal` : "—";
+  $("#heapStats").textContent = status.free_heap ? `${Math.round(status.free_heap / 1024)} / ${Math.round((status.min_free_heap || 0) / 1024)} KB` : "—";
   const quality = Math.max(0, Math.min(100, (status.rssi + 100) * 2));
   $("#rssiMeter").style.width = `${quality}%`;
   $("#linkAssessment").textContent = !hasData ? "NO DATA" : status.rssi >= -55 ? "EXCELLENT" : status.rssi >= -67 ? "GOOD" : status.rssi >= -75 ? "WEAK" : "UNSTABLE";
@@ -553,7 +631,98 @@ function updateHeatmapOptions() {
   if ([...select.options].some((option) => option.value === selected)) select.value = selected;
 }
 
-function renderAll() { renderAtlas(); renderLab(); renderSentinel(); }
+function mapColor(value, metric) {
+  let quality = metric === "rssi" ? (value + 90) / 50 : metric === "throughput" ? value / 1500 : metric === "latency" ? 1 - value / 350 : 1 - value;
+  quality = Math.max(0, Math.min(1, quality));
+  return `hsla(${quality * 125},95%,55%,.48)`;
+}
+
+function renderMapper() {
+  const canvas = $("#mapperCanvas");
+  if (!canvas) return;
+  const { context: ctx, width, height } = canvasContext(canvas);
+  ctx.clearRect(0, 0, width, height);
+  if (state.map.floorPlan?.complete) ctx.drawImage(state.map.floorPlan, 0, 0, width, height);
+  else {
+    ctx.fillStyle = "#071012"; ctx.fillRect(0, 0, width, height); ctx.strokeStyle = "rgba(100,255,200,.08)";
+    for (let x = 0; x < width; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
+    for (let y = 0; y < height; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
+  }
+  const metric = $("#mapMetric")?.value || "rssi";
+  const profile = $("#mapProfile")?.value || "all";
+  const samples = state.map.samples.filter((sample) => profile === "all" || String(sample.profile) === profile);
+  for (const sample of samples) {
+    const x = sample.x * width, y = sample.y * height;
+    const value = metric === "rssi" ? sample.rssi : metric === "throughput" ? sample.kbps : metric === "latency" ? Math.max(sample.dnsMs, sample.internetMs) : sample.online ? 0 : 1;
+    const radius = Math.max(26, Math.min(width, height) * .1);
+    const gradient = ctx.createRadialGradient(x, y, 2, x, y, radius);
+    gradient.addColorStop(0, mapColor(value, metric)); gradient.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = gradient; ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fill();
+  }
+  if (samples.length) {
+    ctx.strokeStyle = "rgba(231,255,246,.75)"; ctx.lineWidth = 1.5; ctx.beginPath();
+    samples.forEach((sample, index) => index ? ctx.lineTo(sample.x * width, sample.y * height) : ctx.moveTo(sample.x * width, sample.y * height)); ctx.stroke();
+  }
+  ctx.fillStyle = state.map.checkpoint ? "#ffca70" : "#64ffc8"; ctx.beginPath(); ctx.arc(state.map.x * width, state.map.y * height, 6, 0, Math.PI * 2); ctx.fill();
+  $("#mapSamples").textContent = state.map.samples.length; $("#mapSteps").textContent = state.map.steps;
+  $("#mapConfidence").textContent = state.map.confidence >= 2 ? "ANCHORED" : state.map.confidence ? "ESTIMATED" : "UNANCHORED";
+  $("#mapActiveProfile").textContent = Number(state.status.active_profile) === 1 ? "BACKUP" : "PRIMARY";
+  const weak = state.map.samples.filter((sample) => sample.rssi < -72 || !sample.online || Math.max(sample.dnsMs, sample.internetMs) > 250);
+  $("#mapWeakZones").textContent = weak.length;
+  const suggestion = weak.length < 3 ? "Keep surveying across rooms and both bands." : "Weak samples cluster near the marked path. Place a mesh node or extender near the transition where signal is roughly −60 to −68 dBm—not inside the deepest dead zone.";
+  $("#mapSuggestions").innerHTML = `<strong>Placement notes</strong><p>${suggestion}</p>`;
+}
+
+function maybeCaptureMapSample(force = false) {
+  if (!state.map.active || !state.authenticated) return;
+  const now = Date.now(); if (!force && now - state.map.lastSample < 1800) return;
+  state.map.lastSample = now;
+  const sample = { at: now, x: state.map.x, y: state.map.y, heading: state.map.heading, confidence: state.map.confidence, rssi: state.status.rssi, channel: state.status.channel, profile: Number(state.status.active_profile || 0), dnsMs: Number(state.status.dns_ms || 0), internetMs: Number(state.status.internet_ms || 0), kbps: Number(state.status.probe_kbps || 0), online: Boolean(state.status.internet), temperatureC: Number(state.status.temperature_c || 0) };
+  state.map.samples.push(sample); state.map.samples = state.map.samples.slice(-3000); saveObservation({ kind: "map", ...sample }); renderMapper();
+  if (now - state.map.lastProbe > 15000) { state.map.lastProbe = now; ble.send({ cmd: "probe" }).catch(() => {}); }
+}
+
+function motionStep(event) {
+  if (!state.map.active) return;
+  const acceleration = event.accelerationIncludingGravity; if (!acceleration) return;
+  const magnitude = Math.hypot(acceleration.x || 0, acceleration.y || 0, acceleration.z || 0);
+  const now = Date.now();
+  if (magnitude > 12.2 && now - state.map.lastStep > 360) {
+    state.map.lastStep = now; state.map.steps += 1; state.map.confidence = Math.max(1, state.map.confidence);
+    const angle = state.map.heading * Math.PI / 180; state.map.x = Math.max(.01, Math.min(.99, state.map.x + Math.sin(angle) * .014)); state.map.y = Math.max(.01, Math.min(.99, state.map.y - Math.cos(angle) * .014));
+    maybeCaptureMapSample(); renderMapper();
+  }
+}
+
+function orientationUpdate(event) {
+  if (!state.map.active) return;
+  const heading = event.webkitCompassHeading ?? (event.alpha == null ? null : 360 - event.alpha);
+  if (heading != null) state.map.heading = heading;
+}
+
+async function toggleMapSurvey() {
+  state.map.active = !state.map.active; $("#mapStart").textContent = state.map.active ? "Stop survey" : "Start survey";
+  if (state.map.active) {
+    try { if (typeof window.DeviceMotionEvent?.requestPermission === "function") await window.DeviceMotionEvent.requestPermission(); } catch {}
+    try { if (typeof window.DeviceOrientationEvent?.requestPermission === "function") await window.DeviceOrientationEvent.requestPermission(); } catch {}
+    window.addEventListener("devicemotion", motionStep); window.addEventListener("deviceorientation", orientationUpdate);
+    if (navigator.geolocation) navigator.geolocation.getCurrentPosition((position) => { state.map.gps = { lat: position.coords.latitude, lon: position.coords.longitude, accuracy: position.coords.accuracy }; }, () => {}, { enableHighAccuracy: true, timeout: 8000 });
+    maybeCaptureMapSample(true); toast("Survey running — set a checkpoint to anchor your position");
+  } else { window.removeEventListener("devicemotion", motionStep); window.removeEventListener("deviceorientation", orientationUpdate); }
+  renderMapper();
+}
+
+async function loadFloorPlan(file) {
+  if (!file) return;
+  const source = new Image(); source.src = URL.createObjectURL(file); await source.decode();
+  const scale = Math.min(1, 1600 / Math.max(source.width, source.height)); const canvas = document.createElement("canvas"); canvas.width = Math.round(source.width * scale); canvas.height = Math.round(source.height * scale); canvas.getContext("2d").drawImage(source, 0, 0, canvas.width, canvas.height);
+  const data = canvas.toDataURL("image/jpeg", .82); URL.revokeObjectURL(source.src); const image = new Image(); image.src = data; await image.decode(); state.map.floorPlan = image; saveObservation({ kind: "floorplan", at: Date.now(), data }); renderMapper();
+}
+
+function exportMapJson() { downloadBlob("specter-coverage.json", JSON.stringify({ exported_at: new Date().toISOString(), gps_anchor: state.map.gps || null, samples: state.map.samples }, null, 2), "application/json"); }
+function downloadBlob(name, data, type) { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([data], { type })); link.download = name; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 500); }
+
+function renderAll() { renderAtlas(); renderLab(); renderSentinel(); renderMapper(); }
 
 async function toggleGps() {
   if (state.gpsWatch !== null) {
@@ -623,6 +792,8 @@ async function loadHistory() {
     const restoredIncidents = [];
     for (const record of records.slice(-3000)) {
       if (record.kind === "gps") state.trail.push(record);
+      else if (record.kind === "map") state.map.samples.push(record);
+      else if (record.kind === "floorplan" && record.data) { const image = new Image(); image.onload = renderMapper; image.src = record.data; state.map.floorPlan = image; }
       else if (record.kind === "incident") restoredIncidents.unshift(record);
       else if (record.kind === "ap" && record.at >= recentCutoff) state.aps.set(record.id, { ...record, lastSeen: record.at });
       else if (record.kind === "ble" && record.at >= recentCutoff) state.bleDevices.set(record.id, { ...record, lastSeen: record.at });
@@ -636,6 +807,7 @@ async function loadHistory() {
       return !newer;
     });
     state.trail = state.trail.slice(-1000);
+    state.map.samples = state.map.samples.slice(-3000);
     state.incidents = state.incidents.slice(0, 50);
     const latest = state.trail.at(-1);
     if (latest) {
@@ -662,6 +834,17 @@ $("#gpsButton").addEventListener("click", toggleGps);
 $("#heatmapNetwork").addEventListener("change", renderTrail);
 $("#exportButton").addEventListener("click", exportSession);
 $("#settingsButton").addEventListener("click", () => $("#settingsDialog").showModal());
+$("#setupScanButton").addEventListener("click", async () => { if (!state.authenticated) return toast("Authenticate this browser first"); state.setupAps.clear(); await ble.send({ cmd: "setup_scan" }); });
+$("#ownerClaim").addEventListener("click", async () => { const key = bytesToHex(crypto.getRandomValues(new Uint8Array(32))); localStorage.setItem("specter-owner-key", key); $("#ownerState").textContent = "CLAIMING OWNER SLOT"; try { await ble.send({ cmd: "claim", owner_key: key }); } catch (error) { localStorage.removeItem("specter-owner-key"); toast(error.message); } });
+$("#ownerCancel").addEventListener("click", () => { ble.clearReconnectTimer(); if (ble.device?.gatt?.connected) ble.device.gatt.disconnect(); $("#ownerDialog").close(); });
+$("#mapStart").addEventListener("click", toggleMapSurvey);
+$("#mapCheckpoint").addEventListener("click", () => { state.map.checkpoint = true; $("#mapHint").textContent = "Tap your current position on the coverage map."; renderMapper(); });
+$("#mapperCanvas").addEventListener("pointerdown", (event) => { if (!state.map.checkpoint) return; const rect = event.currentTarget.getBoundingClientRect(); state.map.x = (event.clientX - rect.left) / rect.width; state.map.y = (event.clientY - rect.top) / rect.height; state.map.checkpoint = false; state.map.confidence = 2; $("#mapHint").textContent = "Checkpoint anchored. Continue walking; re-anchor after turns or drift."; maybeCaptureMapSample(true); });
+$("#floorPlanInput").addEventListener("change", (event) => loadFloorPlan(event.target.files[0]).catch((error) => toast(error.message)));
+$("#mapMetric").addEventListener("change", renderMapper); $("#mapProfile").addEventListener("change", renderMapper);
+$("#mapProbe").addEventListener("click", () => state.authenticated ? ble.send({ cmd: "probe" }) : toast("Connect and authenticate first"));
+$("#mapExportJson").addEventListener("click", exportMapJson);
+$("#mapExportPng").addEventListener("click", () => { const link = document.createElement("a"); link.download = "specter-coverage.png"; link.href = $("#mapperCanvas").toDataURL("image/png"); link.click(); });
 $$(".mode-tab").forEach((button) => button.addEventListener("click", () => setMode(button.dataset.mode)));
 $$(".segmented button").forEach((button) => button.addEventListener("click", () => { selectedBand = Number(button.dataset.band); $$(".segmented button").forEach((item) => item.classList.toggle("active", item === button)); renderChannels(); }));
 $("#sentinelToggle").addEventListener("change", async (event) => { if (state.connected) await ble.send({ cmd: "configure", sentinel_enabled: event.target.checked }); renderSentinel(); });
@@ -669,10 +852,10 @@ $("#notificationButton").addEventListener("click", async () => { if (!("Notifica
 $("#settingsForm").addEventListener("submit", async (event) => {
   if (event.submitter?.value === "cancel") return;
   event.preventDefault();
-  if (!state.connected) return toast("Connect the C5 before sending configuration");
+  if (!state.connected || !state.authenticated) return toast("Connect and authenticate before sending configuration");
   const form = new FormData(event.currentTarget);
-  const command = { cmd: "configure", ssid: form.get("ssid"), password: form.get("password"), worker_url: form.get("worker_url"), device_id: form.get("device_id"), device_token: form.get("device_token"), alert_threshold: Number(form.get("alert_threshold")), heartbeat_seconds: Number(form.get("heartbeat_seconds")), sentinel_enabled: $("#sentinelToggle").checked };
-  try { await ble.send(command); event.currentTarget.elements.password.value = ""; event.currentTarget.elements.device_token.value = ""; $("#settingsDialog").close(); toast("Configuration sent; reboot C5 to apply Wi-Fi changes"); }
+  const command = { cmd: "configure", ssid: form.get("ssid"), password: form.get("password"), backup_ssid: form.get("backup_ssid"), backup_password: form.get("backup_password"), worker_url: form.get("worker_url"), device_id: form.get("device_id"), device_token: form.get("device_token"), alert_threshold: Number(form.get("alert_threshold")), heartbeat_seconds: Number(form.get("heartbeat_seconds")), sentinel_enabled: $("#sentinelToggle").checked };
+  try { await ble.send(command); event.currentTarget.elements.password.value = ""; event.currentTarget.elements.backup_password.value = ""; event.currentTarget.elements.device_token.value = ""; $("#settingsDialog").close(); toast("Configuration stored; reboot C5 to apply Wi-Fi changes"); }
   catch (error) { toast(error.message); }
 });
 

@@ -29,6 +29,7 @@
       <button class="mode-tab active" data-mode="atlas"><span>01</span>Atlas</button>
       <button class="mode-tab" data-mode="lab"><span>02</span>Air Lab</button>
       <button class="mode-tab" data-mode="sentinel"><span>03</span>Sentinel</button>
+      <button class="mode-tab" data-mode="mapper"><span>04</span>Mapper</button>
     </nav>
 
     <section id="atlasPanel" class="mode-panel active" aria-labelledby="atlasTitle">
@@ -84,7 +85,25 @@
       </div>
       <div class="lab-grid">
         <article class="instrument channel-card"><div class="card-heading"><div><p class="eyebrow">OCCUPANCY PROXY</p><h2>Channels</h2></div><div class="segmented"><button class="active" data-band="2">2.4</button><button data-band="5">5</button></div></div><canvas id="channelCanvas" width="900" height="400" aria-label="Observed Wi-Fi networks by channel"></canvas></article>
-        <article class="instrument link-card"><p class="eyebrow">CURRENT LINK</p><div class="signal-number"><strong id="currentRssi">—</strong><span>dBm</span></div><div class="meter"><span id="rssiMeter"></span></div><div class="metric-row"><span>Channel</span><strong id="currentChannel">—</strong></div><div class="metric-row"><span>Assessment</span><strong id="linkAssessment">NO DATA</strong></div></article>
+        <article class="instrument link-card"><p class="eyebrow">CURRENT LINK</p><div class="signal-number"><strong id="currentRssi">—</strong><span>dBm</span></div><div class="meter"><span id="rssiMeter"></span></div><div class="metric-row"><span>Channel</span><strong id="currentChannel">—</strong></div><div class="metric-row"><span>Profile</span><strong id="activeProfile">—</strong></div><div class="metric-row"><span>DNS / Internet</span><strong id="linkLatency">—</strong></div><div class="metric-row"><span>Probe speed</span><strong id="probeSpeed">—</strong></div><div class="metric-row"><span>Chip temperature</span><strong id="chipTemperature">—</strong></div><div class="metric-row"><span>Free / minimum heap</span><strong id="heapStats">—</strong></div><div class="metric-row"><span>Assessment</span><strong id="linkAssessment">NO DATA</strong></div></article>
+      </div>
+    </section>
+
+    <section id="mapperPanel" class="mode-panel" aria-labelledby="mapperTitle">
+      <div class="section-heading"><p class="eyebrow">INDOOR COVERAGE SURVEY</p><h1 id="mapperTitle">Field Mapper</h1><p>Walk the property with your phone. Motion, heading, optional GPS, and manual checkpoints anchor C5 radio measurements without pretending indoor GPS is precise.</p></div>
+      <div class="mapper-grid">
+        <article class="instrument mapper-card">
+          <div class="card-heading"><div><p class="eyebrow">LOCAL FLOOR PLAN</p><h2>Coverage surface</h2></div><div class="mapper-actions"><button id="mapStart" class="button compact">Start survey</button><button id="mapCheckpoint" class="button ghost compact">Set checkpoint</button></div></div>
+          <div class="mapper-toolbar"><label>Layer<select id="mapMetric"><option value="rssi">Signal strength</option><option value="latency">Latency</option><option value="throughput">Throughput</option><option value="loss">Connectivity loss</option></select></label><label>Profile<select id="mapProfile"><option value="all">Both profiles</option><option value="0">Primary</option><option value="1">Backup</option></select></label><label class="file-label">Floor plan<input id="floorPlanInput" type="file" accept="image/*"></label></div>
+          <canvas id="mapperCanvas" width="1100" height="660" aria-label="Indoor Wi-Fi coverage map"></canvas>
+          <p class="map-hint" id="mapHint">Optional: load a floor plan. Tap Set checkpoint, then tap your current spot on the map to anchor the walking path.</p>
+        </article>
+        <aside class="instrument mapper-stats">
+          <p class="eyebrow">SURVEY STATE</p>
+          <div class="metric-row"><span>Samples</span><strong id="mapSamples">0</strong></div><div class="metric-row"><span>Steps inferred</span><strong id="mapSteps">0</strong></div><div class="metric-row"><span>Position confidence</span><strong id="mapConfidence">UNANCHORED</strong></div><div class="metric-row"><span>Active profile</span><strong id="mapActiveProfile">—</strong></div><div class="metric-row"><span>Weak zones</span><strong id="mapWeakZones">0</strong></div>
+          <button id="mapProbe" class="button compact">Run speed probe</button><button id="mapExportPng" class="button ghost compact">Export PNG</button><button id="mapExportJson" class="button ghost compact">Export survey JSON</button>
+          <div id="mapSuggestions" class="suggestions"><strong>Placement notes</strong><p>Collect at least eight samples across multiple rooms.</p></div>
+        </aside>
       </div>
     </section>
 
@@ -114,11 +133,15 @@
   <dialog id="settingsDialog">
     <form id="settingsForm" method="dialog">
       <div class="dialog-heading"><div><p class="eyebrow">DEVICE CONFIGURATION</p><h2>Configure SPECTER</h2></div><button value="cancel" class="icon-button" aria-label="Close">×</button></div>
-      <fieldset><legend>Home Wi-Fi</legend><label>Network name<input name="ssid" maxlength="32" autocomplete="off"></label><label>Password<input name="password" type="password" maxlength="64" autocomplete="new-password"></label></fieldset>
-      <fieldset><legend>Cloudflare Sentinel</legend><label>Worker URL<input name="worker_url" type="url" placeholder="https://your-worker.workers.dev"></label><label>Device ID<input name="device_id" value="specter-home" maxlength="32"></label><label>Device token<input name="device_token" type="password" maxlength="96" autocomplete="new-password"></label><div class="form-pair"><label>Alert threshold<input name="alert_threshold" type="number" min="30" max="100" value="70"></label><label>Heartbeat seconds<input name="heartbeat_seconds" type="number" min="15" max="300" value="30"></label></div></fieldset>
+      <fieldset><legend>Primary + backup Wi-Fi</legend><div class="wifi-scan-heading"><p>Scan nearby access points for about five seconds, or enter a hidden network manually.</p><button id="setupScanButton" type="button" class="button compact">Scan networks</button></div><div id="setupNetworkList" class="network-picker"><p>No setup scan run yet.</p></div><label>Primary network<input name="ssid" maxlength="32" autocomplete="off" placeholder="Select above or type hidden SSID"></label><label>Primary password<input name="password" type="password" maxlength="64" autocomplete="new-password"></label><label>Backup network<input name="backup_ssid" maxlength="32" autocomplete="off" placeholder="Optional fallback"></label><label>Backup password<input name="backup_password" type="password" maxlength="64" autocomplete="new-password"></label><p class="privacy-note">PMF is supported when offered, but is never required.</p></fieldset>
+      <fieldset><legend>Cloudflare Sentinel</legend><label>Worker URL<input name="worker_url" type="url" value="https://specter-sentinel.mdotcom31.workers.dev"></label><label>Device ID<input name="device_id" placeholder="Your private device name" maxlength="32" autocomplete="off"></label><label>Device token<input name="device_token" type="password" maxlength="96" autocomplete="new-password"></label><div class="form-pair"><label>Alert threshold<input name="alert_threshold" type="number" min="30" max="100" value="70"></label><label>Heartbeat seconds<input name="heartbeat_seconds" type="number" min="15" max="300" value="30"></label></div></fieldset>
       <p class="privacy-note">Credentials are sent directly to the connected C5 over BLE. This page does not save the Wi-Fi password or device token.</p>
       <div class="dialog-actions"><button value="cancel" class="button ghost">Cancel</button><button id="saveSettings" value="default" class="button primary">Send to C5</button></div>
     </form>
+  </dialog>
+
+  <dialog id="ownerDialog">
+    <div class="dialog-heading"><div><p class="eyebrow">OWNER LOCK</p><h2>Authorize this browser</h2></div></div><p id="ownerInstructions">Briefly press the physical BOOT button on the C5, then claim this browser during the 90-second window.</p><div class="owner-state" id="ownerState">WAITING FOR PHYSICAL BUTTON</div><p class="privacy-note">The owner key stays only in this browser. Up to three browsers can be authorized. Holding BOOT for 10 seconds clears all owners.</p><div class="dialog-actions"><button id="ownerCancel" class="button ghost">Disconnect</button><button id="ownerClaim" class="button primary" disabled>Claim browser</button></div>
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
