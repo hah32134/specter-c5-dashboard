@@ -45,6 +45,7 @@ class SpecterBLE {
   connecting = false;
   reconnectTimer = null;
   reconnectAttempt = 0;
+  initialScanSent = false;
   disconnectListener = () => this.onDisconnect();
   telemetryListener = (event) => this.receive(event.target.value);
 
@@ -86,7 +87,10 @@ class SpecterBLE {
       clearInterval(demoTimer);
       updateConnection();
       await this.send({ cmd: "hello" });
-      await this.send({ cmd: "scan" });
+      if (!this.initialScanSent) {
+        this.initialScanSent = true;
+        await this.send({ cmd: "scan" });
+      }
     } catch (error) {
       state.connected = false;
       state.reconnecting = Boolean(this.device);
@@ -152,7 +156,7 @@ class SpecterBLE {
     this.command = null;
     this.telemetry = null;
     updateConnection();
-    toast("SPECTER link lost — reconnecting");
+    toast("SPECTER link lost - reconnecting");
     this.scheduleReconnect(700);
   }
 
