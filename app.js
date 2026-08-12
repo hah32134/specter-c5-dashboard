@@ -674,7 +674,7 @@ function renderMapper() {
 }
 
 function maybeCaptureMapSample(force = false) {
-  if (!state.map.active || !state.authenticated) return;
+  if (!state.map.active || (!state.authenticated && !state.demo)) return;
   const now = Date.now(); if (!force && now - state.map.lastSample < 1800) return;
   state.map.lastSample = now;
   const sample = { at: now, x: state.map.x, y: state.map.y, heading: state.map.heading, confidence: state.map.confidence, rssi: state.status.rssi, channel: state.status.channel, profile: Number(state.status.active_profile || 0), dnsMs: Number(state.status.dns_ms || 0), internetMs: Number(state.status.internet_ms || 0), kbps: Number(state.status.probe_kbps || 0), online: Boolean(state.status.internet), temperatureC: Number(state.status.temperature_c || 0) };
@@ -759,7 +759,8 @@ function startDemo() {
       state.aps.set(id, { t: "ap", id, ssid: Math.random() > .32 ? names[i % names.length] : "", band, channel, rssi: -35 - Math.floor(Math.random() * 58), lastSeen: Date.now() });
     }
     const spike = Math.random() > .88;
-    Object.assign(state.status, { wifi: true, gateway: true, internet: !spike, dns: true, rssi: -46 - Math.floor(Math.random() * 12), channel: 149, wifi_2g: [...state.aps.values()].filter((ap) => ap.band === 2).length, wifi_5g: [...state.aps.values()].filter((ap) => ap.band === 5).length, deauth: spike ? 38 : Math.floor(Math.random() * 3), disconnects: spike ? 2 : 0, beacon_timeouts: spike ? 1 : 0, score: spike ? 78 : Math.floor(Math.random() * 12), classification: spike ? "suspicious_rf_event" : "normal" });
+    Object.assign(state.status, { wifi: true, gateway: true, internet: !spike, dns: true, rssi: -46 - Math.floor(Math.random() * 12), channel: 149, active_profile: Math.random() > .8 ? 1 : 0, dns_ms: 8 + Math.floor(Math.random() * 25), internet_ms: 18 + Math.floor(Math.random() * 70), probe_kbps: 700 + Math.floor(Math.random() * 900), temperature_c: 43 + Math.random() * 5, free_heap: 148000, min_free_heap: 132000, wifi_2g: [...state.aps.values()].filter((ap) => ap.band === 2).length, wifi_5g: [...state.aps.values()].filter((ap) => ap.band === 5).length, deauth: spike ? 38 : Math.floor(Math.random() * 3), disconnects: spike ? 2 : 0, beacon_timeouts: spike ? 1 : 0, score: spike ? 78 : Math.floor(Math.random() * 12), classification: spike ? "suspicious_rf_event" : "normal" });
+    maybeCaptureMapSample();
     if (spike && previousScore < 70) addIncident(state.status);
     renderAll();
   };
