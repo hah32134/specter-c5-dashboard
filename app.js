@@ -482,6 +482,11 @@ function renderSentinel() {
 
 function addIncident(status) {
   const incident = { at: Date.now(), score: status.score, classification: status.classification, deauth: status.deauth, beacon: status.beacon_timeouts };
+  const previous = state.incidents[0];
+  const duplicate = previous && incident.at - previous.at < 60000 &&
+    previous.score === incident.score && previous.classification === incident.classification &&
+    (previous.deauth || 0) === (incident.deauth || 0) && (previous.beacon || 0) === (incident.beacon || 0);
+  if (duplicate) return;
   state.incidents.unshift(incident); state.incidents = state.incidents.slice(0, 50);
   saveObservation({ kind: "incident", ...incident });
   if ("Notification" in window && Notification.permission === "granted") new Notification("SPECTER interference warning", { body: `${classificationCopy[incident.classification]?.[0] || incident.classification} · score ${incident.score}/100` });
@@ -575,6 +580,7 @@ function startDemo() {
   state.demo = true; state.connected = false; updateConnection(); clearInterval(demoTimer);
   const names = ["NIGHTSHIFT", "apartment-5G", "printer", "mesh-node", "unknown", "HOME-LAB", "camera-net", "guest"];
   const generate = () => {
+    const previousScore = state.status.score;
     state.aps.clear();
     const count = 18 + Math.floor(Math.random() * 15);
     for (let i = 0; i < count; i += 1) {
@@ -585,7 +591,7 @@ function startDemo() {
     }
     const spike = Math.random() > .88;
     Object.assign(state.status, { wifi: true, gateway: true, internet: !spike, dns: true, rssi: -46 - Math.floor(Math.random() * 12), channel: 149, wifi_2g: [...state.aps.values()].filter((ap) => ap.band === 2).length, wifi_5g: [...state.aps.values()].filter((ap) => ap.band === 5).length, deauth: spike ? 38 : Math.floor(Math.random() * 3), disconnects: spike ? 2 : 0, beacon_timeouts: spike ? 1 : 0, score: spike ? 78 : Math.floor(Math.random() * 12), classification: spike ? "suspicious_rf_event" : "normal" });
-    if (spike) addIncident(state.status);
+    if (spike && previousScore < 70) addIncident(state.status);
     renderAll();
   };
   generate(); demoTimer = setInterval(generate, 5000); toast("Demo telemetry active");
@@ -614,12 +620,21 @@ async function loadHistory() {
       request.onerror = () => reject(request.error);
     });
     const recentCutoff = Date.now() - 120000;
+    const restoredIncidents = [];
     for (const record of records.slice(-3000)) {
       if (record.kind === "gps") state.trail.push(record);
-      else if (record.kind === "incident") state.incidents.unshift(record);
+      else if (record.kind === "incident") restoredIncidents.unshift(record);
       else if (record.kind === "ap" && record.at >= recentCutoff) state.aps.set(record.id, { ...record, lastSeen: record.at });
       else if (record.kind === "ble" && record.at >= recentCutoff) state.bleDevices.set(record.id, { ...record, lastSeen: record.at });
     }
+    state.incidents = restoredIncidents.filter((incident, index, incidents) => {
+      const newer = incidents.slice(0, index).find((candidate) =>
+        candidate.at - incident.at < 60000 && candidate.at >= incident.at &&
+        candidate.score === incident.score && candidate.classification === incident.classification &&
+        (candidate.deauth || 0) === (incident.deauth || 0) &&
+        (candidate.beacon || 0) === (incident.beacon || 0));
+      return !newer;
+    });
     state.trail = state.trail.slice(-1000);
     state.incidents = state.incidents.slice(0, 50);
     const latest = state.trail.at(-1);
