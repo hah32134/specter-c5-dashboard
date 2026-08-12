@@ -24,6 +24,8 @@ const state = {
   scan: { active: false, done: 0, total: 0, phase: "ready" },
   pendingPowerPolicy: null,
   pendingManualPower: null,
+  pendingProfile: null,
+  intentionalShutdown: false,
   status: {
     wifi: false, gateway: false, internet: false, dns: false,
     rssi: -127, channel: 0, wifi_2g: 0, wifi_5g: 0,
@@ -98,6 +100,7 @@ class SpecterBLE {
       state.connected = true;
       state.authenticated = false;
       state.reconnecting = false;
+      state.intentionalShutdown = false;
       state.manualReconnect = false;
       state.demo = false;
       this.reconnectAttempt = 0;
@@ -129,7 +132,7 @@ class SpecterBLE {
     try { if (this.device?.gatt?.connected) this.device.gatt.disconnect(); } catch {}
     this.device = null; this.command = null; this.telemetry = null; this.input = "";
     this.reconnectAttempt = 0; this.initialScanSent = false;
-    state.connected = false; state.authenticated = false; state.reconnecting = false; state.manualReconnect = false;
+    state.connected = false; state.authenticated = false; state.reconnecting = false; state.manualReconnect = false; state.intentionalShutdown = false;
     try { localStorage.removeItem("specter-device-id"); } catch {}
   }
 
@@ -184,13 +187,18 @@ class SpecterBLE {
   onDisconnect() {
     state.connected = false;
     state.authenticated = false;
-    state.reconnecting = true;
+    state.reconnecting = !state.intentionalShutdown;
     state.manualReconnect = false;
     this.command = null;
     this.telemetry = null;
     updateConnection();
-    toast("SPECTER link lost - reconnecting");
-    this.scheduleReconnect(700);
+    if (state.intentionalShutdown) {
+      this.clearReconnectTimer();
+      if (!$("#shutdownCompleteDialog").open) $("#shutdownCompleteDialog").showModal();
+    } else {
+      toast("SPECTER link lost - reconnecting");
+      this.scheduleReconnect(700);
+    }
   }
 
   receive(value) {
@@ -366,6 +374,11 @@ function handleTelemetry(message) {
       state.pendingManualPower = null;
       toast(enabled ? "Manual Low Power verified by SPECTER" : "Manual override cleared — schedule remains automatic");
     }
+    if (state.pendingProfile !== null && Number(message.active_profile) === state.pendingProfile) {
+      const profile = state.pendingProfile;
+      state.pendingProfile = null;
+      toast(`${profile === 1 ? "Backup" : "Primary"} protection verified by SPECTER`);
+    }
     renderAll();
     if (message.score >= 70 && previous < 70) addIncident(message);
     maybeCaptureMapSample();
@@ -374,6 +387,13 @@ function handleTelemetry(message) {
   } else if (message.t === "configured") {
     $("#heartbeatEvidence").textContent = "CONFIGURED";
     toast(message.restarting ? "Configuration stored — C5 restarting" : "Configuration stored on SPECTER");
+  } else if (message.t === "profile_switching") {
+    toast("Switching the actively protected Wi-Fi profile");
+  } else if (message.t === "shutdown_registered") {
+    state.intentionalShutdown = true;
+    ble.clearReconnectTimer();
+    if ($("#shutdownDialog").open) $("#shutdownDialog").close();
+    if (!$("#shutdownCompleteDialog").open) $("#shutdownCompleteDialog").showModal();
   } else if (message.t === "error") {
     toast(`C5: ${message.message || message.code}`);
   } else if (message.t === "ready" || message.t === "hello") {
@@ -555,6 +575,13 @@ function renderLab() {
   $("#currentRssi").textContent = hasData && status.rssi > -127 ? status.rssi : "—";
   $("#currentChannel").textContent = status.channel || "—";
   $("#activeProfile").textContent = hasData ? (Number(status.active_profile) === 1 ? "BACKUP" : "PRIMARY") : "—";
+  const profileBusy = state.pendingProfile !== null;
+  const profileEnabled = state.connected && state.authenticated && !profileBusy;
+  $("#protectPrimary").disabled = !profileEnabled;
+  $("#protectBackup").disabled = !profileEnabled;
+  $("#protectPrimary").classList.toggle("active", hasData && Number(status.active_profile) === 0);
+  $("#protectBackup").classList.toggle("active", hasData && Number(status.active_profile) === 1);
+  $("#profileControlDetail").textContent = !hasData ? "Connect SPECTER to choose the protected AP." : Number(status.active_profile) === 1 && status.backup_protection_active ? "Backup protection is locked on its channel for testing. Select Primary to return." : Number(status.active_profile) === 1 ? "Backup is active after failover; SPECTER will probe and return to Primary after cooldown." : "Primary is continuously protected. Backup is standby, not simultaneously monitored.";
   $("#linkLatency").textContent = hasData ? `${status.dns_ms || 0} / ${status.internet_ms || 0} ms` : "—";
   $("#probeSpeed").textContent = status.probe_kbps ? `${status.probe_kbps} kbps` : "NOT RUN";
   $("#chipTemperature").textContent = Number.isFinite(Number(status.temperature_c)) ? `${Number(status.temperature_c).toFixed(1)} °C internal` : "—";
@@ -574,6 +601,7 @@ function renderLab() {
   const quality = Math.max(0, Math.min(100, (status.rssi + 100) * 2));
   $("#rssiMeter").style.width = `${quality}%`;
   $("#linkAssessment").textContent = !hasData ? "NO DATA" : status.rssi >= -55 ? "EXCELLENT" : status.rssi >= -67 ? "GOOD" : status.rssi >= -75 ? "WEAK" : "UNSTABLE";
+  $("#shutdownButton").disabled = !state.connected || !state.authenticated || state.intentionalShutdown;
   renderChannels();
 }
 
@@ -926,7 +954,7 @@ $("#mapProbe").addEventListener("click", () => state.authenticated ? ble.send({ 
 $("#mapExportJson").addEventListener("click", exportMapJson);
 $("#mapExportPng").addEventListener("click", () => { const link = document.createElement("a"); link.download = "specter-coverage.png"; link.href = $("#mapperCanvas").toDataURL("image/png"); link.click(); });
 $$(".mode-tab").forEach((button) => button.addEventListener("click", () => setMode(button.dataset.mode)));
-$$(".segmented button").forEach((button) => button.addEventListener("click", () => { selectedBand = Number(button.dataset.band); $$(".segmented button").forEach((item) => item.classList.toggle("active", item === button)); renderChannels(); }));
+$$(".segmented button[data-band]").forEach((button) => button.addEventListener("click", () => { selectedBand = Number(button.dataset.band); $$(".segmented button[data-band]").forEach((item) => item.classList.toggle("active", item === button)); renderChannels(); }));
 $("#sentinelToggle").addEventListener("change", async (event) => { if (state.connected) await ble.send({ cmd: "configure", sentinel_enabled: event.target.checked }); renderSentinel(); });
 $("#manualPowerToggle").addEventListener("click", async () => {
   if (!state.connected || !state.authenticated) return toast("Connect and authenticate first");
@@ -935,6 +963,26 @@ $("#manualPowerToggle").addEventListener("click", async () => {
   renderLab();
   try { await ble.send({ cmd: "configure", low_power_manual: requested }); toast("Power request sent; waiting for device verification"); }
   catch (error) { state.pendingManualPower = null; renderLab(); toast(error.message); }
+});
+async function selectProtectedProfile(profile) {
+  if (!state.connected || !state.authenticated) return toast("Connect and authenticate first");
+  state.pendingProfile = profile;
+  renderLab();
+  try { await ble.send({ cmd: "protect_profile", profile }); toast("Profile request sent; waiting for device verification"); }
+  catch (error) { state.pendingProfile = null; renderLab(); toast(error.message); }
+}
+$("#protectPrimary").addEventListener("click", () => selectProtectedProfile(0));
+$("#protectBackup").addEventListener("click", () => selectProtectedProfile(1));
+$("#shutdownButton").addEventListener("click", () => { $("#shutdownConfirmation").value = ""; $("#shutdownConfirm").disabled = true; $("#shutdownDialog").showModal(); });
+$("#shutdownConfirmation").addEventListener("input", (event) => { $("#shutdownConfirm").disabled = event.target.value !== "SHUTDOWN"; });
+const cancelShutdown = () => $("#shutdownDialog").close();
+$("#shutdownCancel").addEventListener("click", cancelShutdown);
+$("#shutdownCancelTop").addEventListener("click", cancelShutdown);
+$("#shutdownConfirm").addEventListener("click", async () => {
+  if ($("#shutdownConfirmation").value !== "SHUTDOWN") return;
+  $("#shutdownConfirm").disabled = true;
+  try { await ble.send({ cmd: "shutdown" }); toast("Registering intentional shutdown with the cloud"); }
+  catch (error) { $("#shutdownConfirm").disabled = false; toast(error.message); }
 });
 $("#notificationButton").addEventListener("click", async () => { if (!("Notification" in window)) return toast("Browser notifications are unavailable here"); const permission = await Notification.requestPermission(); toast(permission === "granted" ? "Phone alerts enabled while the app is active" : "Notification permission was not granted"); });
 $("#settingsForm").addEventListener("submit", async (event) => {
