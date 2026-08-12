@@ -23,6 +23,7 @@ const state = {
   lastGpsIds: new Set(),
   scan: { active: false, done: 0, total: 0, phase: "ready" },
   pendingPowerPolicy: null,
+  pendingManualPower: null,
   status: {
     wifi: false, gateway: false, internet: false, dns: false,
     rssi: -127, channel: 0, wifi_2g: 0, wifi_5g: 0,
@@ -358,6 +359,13 @@ function handleTelemetry(message) {
       state.pendingPowerPolicy = null;
       toast("Night protection verified by SPECTER");
     }
+    if (state.pendingManualPower !== null &&
+        message.low_power_manual === state.pendingManualPower &&
+        (!state.pendingManualPower || message.low_power_active === true)) {
+      const enabled = state.pendingManualPower;
+      state.pendingManualPower = null;
+      toast(enabled ? "Manual Low Power verified by SPECTER" : "Manual override cleared — schedule remains automatic");
+    }
     renderAll();
     if (message.score >= 70 && previous < 70) addIncident(message);
     maybeCaptureMapSample();
@@ -552,7 +560,13 @@ function renderLab() {
   $("#chipTemperature").textContent = Number.isFinite(Number(status.temperature_c)) ? `${Number(status.temperature_c).toFixed(1)} °C internal` : "—";
   const thermalStates = ["NORMAL", "THROTTLED", "RADIOS COOLING", "RESET REQUIRED"];
   $("#thermalProtection").textContent = thermalStates[Number(status.thermal_state || 0)] || "UNKNOWN";
-  $("#powerPolicy").textContent = !hasData ? "WAITING" : !status.low_power_enabled ? "DISABLED" : status.low_power_active ? "SLEEP MODE" : "AWAKE";
+  const manualLowPower = Boolean(status.low_power_manual);
+  $("#powerPolicy").textContent = !hasData ? "WAITING" : manualLowPower ? "MANUAL LOW POWER" : status.low_power_active ? "NIGHT LOW POWER" : status.low_power_enabled ? "AWAKE · AUTO ARMED" : "AWAKE · AUTO OFF";
+  const powerButton = $("#manualPowerToggle");
+  powerButton.disabled = !state.connected || !state.authenticated || state.pendingManualPower !== null;
+  powerButton.textContent = state.pendingManualPower !== null ? "Applying…" : manualLowPower ? "Return to Automatic" : "Enable Low Power";
+  powerButton.classList.toggle("active", manualLowPower);
+  $("#powerControlDetail").textContent = !hasData ? "Connect SPECTER to control power mode." : manualLowPower ? "Manual override is saved and active. Scans are reduced until you return to automatic." : status.low_power_active ? "The Pennsylvania night schedule activated low power automatically." : status.low_power_enabled ? `Automatic schedule armed for ${String(status.quiet_start_hour ?? 22).padStart(2, "0")}:00–${String(status.quiet_end_hour ?? 8).padStart(2, "0")}:00 PA time.` : "Automatic night mode is disabled in Settings.";
   const sweepSeconds = Number(status.scan_interval_seconds || 0);
   $("#scanCadence").textContent = sweepSeconds ? (sweepSeconds >= 3600 ? `${sweepSeconds / 3600} HOUR` : `${Math.round(sweepSeconds / 60)} MIN`) : "—";
   $("#clockState").textContent = status.time_synced ? "PA TIME SYNCED" : "SYNCING";
@@ -914,6 +928,14 @@ $("#mapExportPng").addEventListener("click", () => { const link = document.creat
 $$(".mode-tab").forEach((button) => button.addEventListener("click", () => setMode(button.dataset.mode)));
 $$(".segmented button").forEach((button) => button.addEventListener("click", () => { selectedBand = Number(button.dataset.band); $$(".segmented button").forEach((item) => item.classList.toggle("active", item === button)); renderChannels(); }));
 $("#sentinelToggle").addEventListener("change", async (event) => { if (state.connected) await ble.send({ cmd: "configure", sentinel_enabled: event.target.checked }); renderSentinel(); });
+$("#manualPowerToggle").addEventListener("click", async () => {
+  if (!state.connected || !state.authenticated) return toast("Connect and authenticate first");
+  const requested = !Boolean(state.status.low_power_manual);
+  state.pendingManualPower = requested;
+  renderLab();
+  try { await ble.send({ cmd: "configure", low_power_manual: requested }); toast("Power request sent; waiting for device verification"); }
+  catch (error) { state.pendingManualPower = null; renderLab(); toast(error.message); }
+});
 $("#notificationButton").addEventListener("click", async () => { if (!("Notification" in window)) return toast("Browser notifications are unavailable here"); const permission = await Notification.requestPermission(); toast(permission === "granted" ? "Phone alerts enabled while the app is active" : "Notification permission was not granted"); });
 $("#settingsForm").addEventListener("submit", async (event) => {
   if (event.submitter?.value === "cancel") return;
