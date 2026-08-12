@@ -36,14 +36,14 @@
         <article class="instrument radar-card">
           <div class="card-heading">
             <div><p class="eyebrow">LIVE FIELD</p><h1 id="atlasTitle">Ghost Atlas</h1></div>
-            <button id="scanButton" class="button compact">Pulse scan</button>
+            <div class="scan-control"><span id="scanState">READY</span><button id="scanButton" class="button compact">Pulse scan</button></div>
           </div>
           <div class="radar-wrap">
             <canvas id="radarCanvas" width="720" height="720" aria-label="Live wireless signal radar"></canvas>
             <div class="radar-center"><span></span></div>
             <div class="sweep"></div>
           </div>
-          <div class="legend"><span class="two">2.4 GHz</span><span class="five">5 GHz</span><span class="known">Familiar</span></div>
+          <div class="legend"><span class="two">2.4 GHz</span><span class="five">5 GHz</span><span class="ble">BLE</span><span class="known">Familiar</span></div>
         </article>
 
         <div class="side-stack">
@@ -52,14 +52,16 @@
             <div id="atmosphere" class="atmosphere">DORMANT</div>
             <div class="metric-row"><span>Observed</span><strong id="observedCount">0</strong></div>
             <div class="metric-row"><span>2.4 / 5 GHz</span><strong><span id="count2g">0</span> / <span id="count5g">0</span></strong></div>
+            <div class="metric-row"><span>Nearby BLE</span><strong id="countBle">0</strong></div>
             <div class="metric-row"><span>Strongest</span><strong id="strongestSignal">—</strong></div>
           </article>
 
           <article class="instrument gps-card">
-            <div class="card-heading"><div><p class="eyebrow">TRAIL</p><h2>Position memory</h2></div><button id="gpsButton" class="button compact">Start GPS</button></div>
-            <canvas id="trailCanvas" width="640" height="280" aria-label="GPS trail colored by wireless change"></canvas>
+            <div class="card-heading"><div><p class="eyebrow">COVERAGE MAP</p><h2>Wi-Fi heatmap</h2></div><button id="gpsButton" class="button compact">Start GPS</button></div>
+            <label class="heatmap-picker">Layer<select id="heatmapNetwork"><option value="field">Overall field</option></select></label>
+            <canvas id="trailCanvas" width="640" height="280" aria-label="GPS Wi-Fi signal heatmap"></canvas>
             <div class="metric-row"><span>Accuracy</span><strong id="gpsAccuracy">—</strong></div>
-            <div class="metric-row"><span>Samples</span><strong id="gpsSamples">0</strong></div>
+            <div class="metric-row"><span>Mapped samples</span><strong id="gpsSamples">0</strong></div>
           </article>
         </div>
       </div>

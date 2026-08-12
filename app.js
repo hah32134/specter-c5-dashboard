@@ -10,10 +10,13 @@ const state = {
   demo: false,
   mode: "atlas",
   aps: new Map(),
+  bleDevices: new Map(),
   trail: [],
   incidents: [],
   gpsWatch: null,
   gpsAccuracy: null,
+  lastGpsIds: new Set(),
+  scan: { active: false, done: 0, total: 0, phase: "ready" },
   status: {
     wifi: false, gateway: false, internet: false, dns: false,
     rssi: -127, channel: 0, wifi_2g: 0, wifi_5g: 0,
@@ -28,6 +31,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 let toastTimer;
 let demoTimer;
+let scanFinishTimer;
 
 function toast(message) {
   const element = $("#toast");
@@ -209,10 +213,43 @@ function handleTelemetry(message) {
   if (message.t === "ap") {
     state.aps.set(message.id, { ...message, lastSeen: Date.now() });
     saveObservation({ kind: "ap", at: Date.now(), ...message });
+  } else if (message.t === "ble") {
+    state.bleDevices.set(message.id, { ...message, lastSeen: Date.now() });
+    saveObservation({ kind: "ble", at: Date.now(), ...message });
+  } else if (message.t === "scan_queued") {
+    Object.assign(state.scan, { active: true, done: 0, total: 0, phase: "queued" });
+    renderScanState();
+  } else if (message.t === "scan_started") {
+    Object.assign(state.scan, { active: true, done: 0, total: message.total || 0, phase: "wifi" });
+    renderScanState();
+  } else if (message.t === "scan_progress") {
+    Object.assign(state.scan, { active: true, done: message.done || 0, total: message.total || 0, phase: "wifi" });
+    renderScanState();
   } else if (message.t === "scan_complete") {
     state.status.wifi_2g = message.wifi_2g;
     state.status.wifi_5g = message.wifi_5g;
+    Object.assign(state.scan, { active: true, phase: "ble" });
+    updateHeatmapOptions();
+    renderScanState();
     renderAll();
+    clearTimeout(scanFinishTimer);
+    scanFinishTimer = setTimeout(() => {
+      if (state.scan.phase === "ble") {
+        Object.assign(state.scan, { active: false, phase: "complete" });
+        renderScanState();
+      }
+    }, 8000);
+  } else if (message.t === "ble_scan_started") {
+    Object.assign(state.scan, { active: true, phase: "ble" });
+    renderScanState();
+  } else if (message.t === "ble_scan_complete") {
+    clearTimeout(scanFinishTimer);
+    Object.assign(state.scan, { active: false, phase: "complete" });
+    renderScanState();
+    renderAll();
+    setTimeout(() => {
+      if (!state.scan.active) { state.scan.phase = "ready"; renderScanState(); }
+    }, 1800);
   } else if (message.t === "status") {
     const previous = state.status.score;
     Object.assign(state.status, message);
@@ -226,6 +263,19 @@ function handleTelemetry(message) {
   } else if (message.t === "ready" || message.t === "hello") {
     toast(`SPECTER ${message.version || ""} ready`);
   }
+}
+
+function renderScanState() {
+  const holder = $(".scan-control");
+  const label = $("#scanState");
+  const button = $("#scanButton");
+  holder.classList.toggle("busy", state.scan.active);
+  button.disabled = state.scan.active;
+  if (state.scan.phase === "queued") label.textContent = "QUEUED";
+  else if (state.scan.phase === "wifi") label.textContent = state.scan.total ? `WI-FI ${state.scan.done}/${state.scan.total}` : "WI-FI";
+  else if (state.scan.phase === "ble") label.textContent = "BLE PASS";
+  else if (state.scan.phase === "complete") label.textContent = "COMPLETE";
+  else label.textContent = "READY";
 }
 
 function modeName(value) {
@@ -244,6 +294,11 @@ async function setMode(mode) {
 function activeAps() {
   const cutoff = Date.now() - 120000;
   return [...state.aps.values()].filter((ap) => ap.lastSeen >= cutoff).sort((a, b) => b.rssi - a.rssi);
+}
+
+function activeBleDevices() {
+  const cutoff = Date.now() - 120000;
+  return [...state.bleDevices.values()].filter((device) => device.lastSeen >= cutoff).sort((a, b) => b.rssi - a.rssi);
 }
 
 function hashNumber(text) {
@@ -292,6 +347,16 @@ function renderRadar() {
     ctx.fillStyle = `rgb(${color})`; ctx.beginPath(); ctx.arc(x, y, size, 0, Math.PI * 2); ctx.fill();
     if (ap.rssi > -60) { ctx.strokeStyle = "rgba(255,202,112,.65)"; ctx.beginPath(); ctx.arc(x, y, size + 4, 0, Math.PI * 2); ctx.stroke(); }
   }
+  for (const device of activeBleDevices().slice(0, 32)) {
+    const angle = (hashNumber(`ble-${device.id}`) % 360) * Math.PI / 180;
+    const normalized = Math.max(0.07, Math.min(.98, (-device.rssi - 30) / 70));
+    const distance = radius * normalized;
+    const x = cx + Math.cos(angle) * distance;
+    const y = cy + Math.sin(angle) * distance;
+    const size = Math.max(2.5, 7 - normalized * 4);
+    ctx.fillStyle = "rgba(189,140,255,.14)"; ctx.beginPath(); ctx.arc(x, y, size * 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#bd8cff"; ctx.beginPath(); ctx.rect(x - size, y - size, size * 2, size * 2); ctx.fill();
+  }
 }
 
 function atmosphereFor(aps) {
@@ -305,21 +370,30 @@ function atmosphereFor(aps) {
 
 function renderAtlas() {
   const aps = activeAps();
+  const bleDevices = activeBleDevices();
   $("#atmosphere").textContent = atmosphereFor(aps);
-  $("#observedCount").textContent = aps.length;
+  $("#observedCount").textContent = aps.length + bleDevices.length;
   $("#count2g").textContent = aps.filter((ap) => ap.band === 2).length;
   $("#count5g").textContent = aps.filter((ap) => ap.band === 5).length;
+  $("#countBle").textContent = bleDevices.length;
   $("#strongestSignal").textContent = aps[0] ? `${aps[0].rssi} dBm` : "—";
   const rows = $("#signalRows");
-  if (!aps.length) {
+  if (!aps.length && !bleDevices.length) {
     rows.innerHTML = '<tr class="empty-row"><td colspan="5">Connect SPECTER or enter demo mode.</td></tr>';
   } else {
-    rows.innerHTML = aps.slice(0, 28).map((ap) => {
+    const wifiRows = aps.slice(0, 24).map((ap) => {
       const strength = Math.max(3, Math.min(100, (ap.rssi + 100) * 1.43));
       const age = Math.max(0, Math.floor((Date.now() - ap.lastSeen) / 1000));
       const label = ap.ssid?.trim() || `ghost-${ap.id.slice(0, 6)}`;
       return `<tr><td>${escapeHtml(label)} <small>${escapeHtml(ap.id.slice(0, 8))}</small></td><td><span class="band-pill ${ap.band === 5 ? "five" : ""}">${ap.band === 5 ? "5" : "2.4"}</span></td><td>${ap.channel}</td><td><span class="strength-bar"><i style="width:${strength}%"></i></span>${ap.rssi}</td><td>${age}s</td></tr>`;
-    }).join("");
+    });
+    const bleRows = bleDevices.slice(0, 12).map((device) => {
+      const strength = Math.max(3, Math.min(100, (device.rssi + 100) * 1.43));
+      const age = Math.max(0, Math.floor((Date.now() - device.lastSeen) / 1000));
+      const label = device.name?.trim() || `ble-ghost-${device.id.slice(0, 6)}`;
+      return `<tr><td>${escapeHtml(label)} <small>${escapeHtml(device.id.slice(0, 8))}</small></td><td><span class="band-pill ble-band">BLE</span></td><td>—</td><td><span class="strength-bar"><i style="width:${strength}%"></i></span>${device.rssi}</td><td>${age}s</td></tr>`;
+    });
+    rows.innerHTML = [...wifiRows, ...bleRows].join("");
   }
   renderRadar();
   renderTrail();
@@ -427,18 +501,51 @@ function renderTrail() {
   ctx.strokeStyle = "rgba(100,255,200,.08)"; ctx.lineWidth = 1;
   for (let x = 0; x < width; x += 35) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,height); ctx.stroke(); }
   for (let y = 0; y < height; y += 35) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(width,y); ctx.stroke(); }
-  if (state.trail.length < 2) return;
+  if (!state.trail.length) {
+    ctx.fillStyle = "#5b746c"; ctx.font = "10px monospace"; ctx.textAlign = "center";
+    ctx.fillText("START GPS AND WALK TO BUILD THE FIELD MAP", width / 2, height / 2);
+    return;
+  }
   const lats = state.trail.map((point) => point.lat), lons = state.trail.map((point) => point.lon);
   const minLat = Math.min(...lats), maxLat = Math.max(...lats), minLon = Math.min(...lons), maxLon = Math.max(...lons);
   const latSpan = Math.max(maxLat - minLat, .00002), lonSpan = Math.max(maxLon - minLon, .00002);
-  state.trail.forEach((point, index) => {
-    if (!index) return;
-    const prior = state.trail[index - 1];
-    const x1 = 10 + (prior.lon - minLon) / lonSpan * (width - 20), y1 = height - 10 - (prior.lat - minLat) / latSpan * (height - 20);
-    const x2 = 10 + (point.lon - minLon) / lonSpan * (width - 20), y2 = height - 10 - (point.lat - minLat) / latSpan * (height - 20);
-    ctx.strokeStyle = `hsl(${160 - Math.min(100, point.change || 0)}, 95%, 68%)`; ctx.lineWidth = 2.5;
-    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+  const selected = $("#heatmapNetwork")?.value || "field";
+  const coordinates = state.trail.map((point) => ({
+    point,
+    x: 10 + (point.lon - minLon) / lonSpan * (width - 20),
+    y: height - 10 - (point.lat - minLat) / latSpan * (height - 20),
+  }));
+  for (const item of coordinates) {
+    const signals = item.point.signals || [];
+    const sample = selected === "field"
+      ? signals.reduce((best, signal) => signal.rssi > (best?.rssi ?? -128) ? signal : best, null)
+      : signals.find((signal) => signal.id === selected);
+    if (!sample) continue;
+    const intensity = Math.max(0, Math.min(1, (sample.rssi + 100) / 65));
+    const hue = 210 - intensity * 210;
+    const radius = 22 + intensity * 20;
+    const gradient = ctx.createRadialGradient(item.x, item.y, 1, item.x, item.y, radius);
+    gradient.addColorStop(0, `hsla(${hue},95%,62%,${.2 + intensity * .45})`);
+    gradient.addColorStop(1, `hsla(${hue},95%,50%,0)`);
+    ctx.fillStyle = gradient; ctx.beginPath(); ctx.arc(item.x, item.y, radius, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.strokeStyle = "rgba(231,255,246,.7)"; ctx.lineWidth = 1.5; ctx.beginPath();
+  coordinates.forEach((item, index) => index ? ctx.lineTo(item.x, item.y) : ctx.moveTo(item.x, item.y));
+  ctx.stroke();
+  const latest = coordinates.at(-1);
+  ctx.fillStyle = "#64ffc8"; ctx.beginPath(); ctx.arc(latest.x, latest.y, 3.5, 0, Math.PI * 2); ctx.fill();
+}
+
+function updateHeatmapOptions() {
+  const select = $("#heatmapNetwork");
+  if (!select) return;
+  const selected = select.value;
+  const options = activeAps().slice(0, 40).map((ap) => {
+    const label = ap.ssid?.trim() || `ghost-${ap.id.slice(0, 6)}`;
+    return `<option value="${escapeHtml(ap.id)}">${escapeHtml(label)} (${ap.band === 5 ? "5" : "2.4"}G)</option>`;
   });
+  select.innerHTML = `<option value="field">Overall field</option>${options.join("")}`;
+  if ([...select.options].some((option) => option.value === selected)) select.value = selected;
 }
 
 function renderAll() { renderAtlas(); renderLab(); renderSentinel(); }
@@ -448,11 +555,15 @@ async function toggleGps() {
     navigator.geolocation.clearWatch(state.gpsWatch); state.gpsWatch = null; $("#gpsButton").textContent = "Start GPS"; return;
   }
   if (!navigator.geolocation) return toast("Geolocation is unavailable in this browser");
-  const priorIds = new Set(activeAps().map((ap) => ap.id));
+  state.lastGpsIds = new Set(activeAps().map((ap) => ap.id));
   state.gpsWatch = navigator.geolocation.watchPosition((position) => {
-    const currentIds = new Set(activeAps().map((ap) => ap.id));
-    let changed = 0; for (const id of currentIds) if (!priorIds.has(id)) changed += 1;
-    const point = { lat: position.coords.latitude, lon: position.coords.longitude, accuracy: position.coords.accuracy, at: Date.now(), change: changed * 8 };
+    const signals = activeAps().slice(0, 48).map(({ id, ssid, rssi, band, channel }) => ({ id, ssid, rssi, band, channel }));
+    const currentIds = new Set(signals.map((signal) => signal.id));
+    let changed = 0;
+    for (const id of currentIds) if (!state.lastGpsIds.has(id)) changed += 1;
+    for (const id of state.lastGpsIds) if (!currentIds.has(id)) changed += 1;
+    state.lastGpsIds = currentIds;
+    const point = { lat: position.coords.latitude, lon: position.coords.longitude, accuracy: position.coords.accuracy, at: Date.now(), change, signals };
     state.trail.push(point); state.trail = state.trail.slice(-1000); state.gpsAccuracy = point.accuracy;
     $("#gpsAccuracy").textContent = `±${Math.round(point.accuracy)} m`; $("#gpsSamples").textContent = state.trail.length;
     saveObservation({ kind: "gps", ...point }); renderTrail();
@@ -494,6 +605,36 @@ async function saveObservation(observation) {
   catch (error) { console.warn("Local history unavailable", error); }
 }
 
+async function loadHistory() {
+  try {
+    const db = await database();
+    const records = await new Promise((resolve, reject) => {
+      const request = db.transaction("observations", "readonly").objectStore("observations").getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+    const recentCutoff = Date.now() - 120000;
+    for (const record of records.slice(-3000)) {
+      if (record.kind === "gps") state.trail.push(record);
+      else if (record.kind === "incident") state.incidents.unshift(record);
+      else if (record.kind === "ap" && record.at >= recentCutoff) state.aps.set(record.id, { ...record, lastSeen: record.at });
+      else if (record.kind === "ble" && record.at >= recentCutoff) state.bleDevices.set(record.id, { ...record, lastSeen: record.at });
+    }
+    state.trail = state.trail.slice(-1000);
+    state.incidents = state.incidents.slice(0, 50);
+    const latest = state.trail.at(-1);
+    if (latest) {
+      state.gpsAccuracy = latest.accuracy;
+      $("#gpsAccuracy").textContent = `±${Math.round(latest.accuracy)} m`;
+      $("#gpsSamples").textContent = state.trail.length;
+    }
+    updateHeatmapOptions();
+    renderAll();
+  } catch (error) {
+    console.warn("SPECTER history restore unavailable", error);
+  }
+}
+
 function exportSession() {
   const data = { exported_at: new Date().toISOString(), status: state.status, signals: activeAps(), trail: state.trail, incidents: state.incidents };
   const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })); link.download = `specter-${new Date().toISOString().replaceAll(":", "-")}.json`; link.click(); URL.revokeObjectURL(link.href);
@@ -503,6 +644,7 @@ $("#connectButton").addEventListener("click", async () => { try { await ble.conn
 $("#demoButton").addEventListener("click", startDemo);
 $("#scanButton").addEventListener("click", async () => { if (state.connected) await ble.send({ cmd: "scan" }); else startDemo(); });
 $("#gpsButton").addEventListener("click", toggleGps);
+$("#heatmapNetwork").addEventListener("change", renderTrail);
 $("#exportButton").addEventListener("click", exportSession);
 $("#settingsButton").addEventListener("click", () => $("#settingsDialog").showModal());
 $$(".mode-tab").forEach((button) => button.addEventListener("click", () => setMode(button.dataset.mode)));
@@ -525,4 +667,5 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 setInterval(() => { if (state.mode === "atlas") renderRadar(); }, 2000);
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => {});
 ble.restore();
-updateConnection(); renderAll();
+loadHistory();
+updateConnection(); renderScanState(); renderAll();
