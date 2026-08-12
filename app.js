@@ -15,6 +15,7 @@ const state = {
   bleDevices: new Map(),
   trail: [],
   incidents: [],
+  evidence: [],
   setupAps: new Map(),
   security: { claimed: false, claimWindow: false, nonce: "" },
   map: { active: false, checkpoint: false, x: .5, y: .5, heading: 0, steps: 0, confidence: 0, samples: [], floorPlan: null, lastStep: 0, lastSample: 0, lastProbe: 0 },
@@ -384,6 +385,15 @@ function handleTelemetry(message) {
     maybeCaptureMapSample();
   } else if (message.t === "probe_result") {
     state.status.probe_kbps = message.kbps || 0; renderLab(); maybeCaptureMapSample(true);
+  } else if (message.t === "evidence") {
+    if (Number(message.offset) === 0) state.evidence = [];
+    state.evidence.push(...(message.entries || []));
+    toast(`Evidence received: ${state.evidence.length} records`);
+  } else if (message.t === "lockdown") {
+    state.status.lockdown_state = message.active ? 2 : 0; renderLab();
+    toast(message.active ? "Defensive Lockdown active" : "Defensive Lockdown ended");
+  } else if (message.t === "fingerprint_reset") {
+    state.status.fingerprint_state = 0; renderLab(); toast("Wi-Fi fingerprints cleared; reconnect to relearn");
   } else if (message.t === "configured") {
     $("#heartbeatEvidence").textContent = "CONFIGURED";
     toast(message.restarting ? "Configuration stored — C5 restarting" : "Configuration stored on SPECTER");
@@ -598,6 +608,24 @@ function renderLab() {
   $("#scanCadence").textContent = sweepSeconds ? (sweepSeconds >= 3600 ? `${sweepSeconds / 3600} HOUR` : `${Math.round(sweepSeconds / 60)} MIN`) : "—";
   $("#clockState").textContent = status.time_synced ? "PA TIME SYNCED" : "SYNCING";
   $("#heapStats").textContent = status.free_heap ? `${Math.round(status.free_heap / 1024)} / ${Math.round((status.min_free_heap || 0) / 1024)} KB` : "—";
+  const authNames = ["OPEN", "WEP", "WPA-PSK", "WPA2-PSK", "WPA/WPA2", "WPA2-ENTERPRISE", "WPA3-PSK", "WPA2/WPA3", "WAPI", "OWE", "WPA3-ENTERPRISE"];
+  const pmfNames = ["UNKNOWN", "CAPABLE", "REQUIRED"];
+  const fingerprintNames = ["UNLEARNED", "MATCH", "CHANGED"];
+  const ledNames = ["OFF", "BOOT", "SETUP", "HEALTHY", "LOW POWER", "BACKUP", "NOTICE", "HIGH", "CRITICAL", "THERMAL"];
+  $("#lockdownState").textContent = status.lockdown_state ? `${Number(status.lockdown_state) === 2 ? "MANUAL" : "AUTO"} ${status.lockdown_remaining_seconds || 0}s` : "OFF";
+  $("#activeBssid").textContent = status.active_bssid || "-";
+  $("#authMode").textContent = authNames[Number(status.authmode || 0)] || `MODE ${status.authmode}`;
+  $("#pmfState").textContent = pmfNames[Number(status.pmf_state || 0)] || "UNKNOWN";
+  $("#fingerprintState").textContent = fingerprintNames[Number(status.fingerprint_state || 0)] || "UNKNOWN";
+  $("#backupReadiness").textContent = status.backup_ready ? "CONFIGURED" : "NOT CONFIGURED";
+  $("#blackboxEntries").textContent = status.blackbox_entries || 0;
+  $("#managementFrames").textContent = `${status.auth_frames || 0} auth / ${status.assoc_frames || 0} assoc / ${status.csa_frames || 0} CSA`;
+  $("#ledState").textContent = ledNames[Number(status.led_state || 0)] || "UNKNOWN";
+  const aegisEnabled = state.connected && state.authenticated;
+  $("#lockdownButton").disabled = !aegisEnabled || Boolean(status.lockdown_state);
+  $("#endLockdownButton").disabled = !aegisEnabled || !status.lockdown_state;
+  $("#evidenceButton").disabled = !aegisEnabled;
+  $("#resetFingerprintButton").disabled = !aegisEnabled;
   const quality = Math.max(0, Math.min(100, (status.rssi + 100) * 2));
   $("#rssiMeter").style.width = `${quality}%`;
   $("#linkAssessment").textContent = !hasData ? "NO DATA" : status.rssi >= -55 ? "EXCELLENT" : status.rssi >= -67 ? "GOOD" : status.rssi >= -75 ? "WEAK" : "UNSTABLE";
@@ -940,6 +968,11 @@ $("#settingsButton").addEventListener("click", () => {
   if (typeof state.status.low_power_enabled === "boolean") form.low_power_enabled.checked = state.status.low_power_enabled;
   form.quiet_start_hour.value = state.status.quiet_start_hour ?? 22;
   form.quiet_end_hour.value = state.status.quiet_end_hour ?? 8;
+  if (typeof state.status.led_enabled === "boolean") form.led_enabled.checked = state.status.led_enabled;
+  form.led_brightness.value = state.status.led_brightness ?? 28;
+  form.led_night_brightness.value = state.status.led_night_brightness ?? 5;
+  form.led_critical_brightness.value = state.status.led_critical_brightness ?? 120;
+  form.led_alert_seconds.value = state.status.led_alert_seconds ?? 20;
   $("#settingsDialog").showModal();
 });
 $("#setupScanButton").addEventListener("click", async () => { if (!state.authenticated) return toast("Authenticate this browser first"); state.setupAps.clear(); await ble.send({ cmd: "setup_scan" }); });
@@ -973,6 +1006,19 @@ async function selectProtectedProfile(profile) {
 }
 $("#protectPrimary").addEventListener("click", () => selectProtectedProfile(0));
 $("#protectBackup").addEventListener("click", () => selectProtectedProfile(1));
+$("#lockdownButton").addEventListener("click", () => ble.send({ cmd: "lockdown", seconds: 900 }).catch((error) => toast(error.message)));
+$("#endLockdownButton").addEventListener("click", () => ble.send({ cmd: "end_lockdown" }).catch((error) => toast(error.message)));
+$("#evidenceButton").addEventListener("click", async () => {
+  state.evidence = []; await ble.send({ cmd: "export_evidence" });
+  setTimeout(() => {
+    const blob = new Blob([JSON.stringify({ exported_at: new Date().toISOString(), device: state.status, format: ["ms", "rssi", "channel", "subtype", "profile", "flags"], evidence: state.evidence }, null, 2)], { type: "application/json" });
+    const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `specter-evidence-${Date.now()}.json`; link.click(); URL.revokeObjectURL(link.href);
+  }, 800);
+});
+$("#resetFingerprintButton").addEventListener("click", async () => {
+  if (!confirm("Clear both learned router fingerprints? SPECTER will relearn them on the next connections.")) return;
+  await ble.send({ cmd: "reset_fingerprint" });
+});
 $("#shutdownButton").addEventListener("click", () => { $("#shutdownConfirmation").value = ""; $("#shutdownConfirm").disabled = true; $("#shutdownDialog").showModal(); });
 $("#shutdownConfirmation").addEventListener("input", (event) => { $("#shutdownConfirm").disabled = event.target.value !== "SHUTDOWN"; });
 const cancelShutdown = () => $("#shutdownDialog").close();
@@ -993,7 +1039,7 @@ $("#settingsForm").addEventListener("submit", async (event) => {
   const lowPowerEnabled = form.get("low_power_enabled") === "on";
   const quietStart = Number(form.get("quiet_start_hour"));
   const quietEnd = Number(form.get("quiet_end_hour"));
-  const command = { cmd: "configure", alert_threshold: Number(form.get("alert_threshold")), heartbeat_seconds: Number(form.get("heartbeat_seconds")), sentinel_enabled: $("#sentinelToggle").checked, low_power_enabled: lowPowerEnabled, quiet_start_hour: quietStart, quiet_end_hour: quietEnd };
+  const command = { cmd: "configure", alert_threshold: Number(form.get("alert_threshold")), heartbeat_seconds: Number(form.get("heartbeat_seconds")), sentinel_enabled: $("#sentinelToggle").checked, low_power_enabled: lowPowerEnabled, quiet_start_hour: quietStart, quiet_end_hour: quietEnd, led_enabled: form.get("led_enabled") === "on", led_brightness: Number(form.get("led_brightness")), led_night_brightness: Number(form.get("led_night_brightness")), led_critical_brightness: Number(form.get("led_critical_brightness")), led_alert_seconds: Number(form.get("led_alert_seconds")) };
   if (form.get("ssid")) Object.assign(command, { ssid: form.get("ssid"), password: form.get("password"), backup_ssid: form.get("backup_ssid"), backup_password: form.get("backup_password") });
   if (form.get("worker_url")) command.worker_url = form.get("worker_url");
   if (form.get("device_id")) command.device_id = form.get("device_id");
