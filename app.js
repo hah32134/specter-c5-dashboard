@@ -341,6 +341,9 @@ function handleTelemetry(message) {
   } else if (message.t === "status") {
     const previous = state.status.score;
     Object.assign(state.status, message);
+    if (typeof message.sentinel_enabled === "boolean") {
+      $("#sentinelToggle").checked = message.sentinel_enabled;
+    }
     renderAll();
     if (message.score >= 70 && previous < 70) addIncident(message);
     maybeCaptureMapSample();
