@@ -8,6 +8,7 @@ const state = {
   connected: false,
   authenticated: false,
   reconnecting: false,
+  manualReconnect: false,
   demo: false,
   mode: "atlas",
   aps: new Map(),
@@ -57,8 +58,9 @@ class SpecterBLE {
   disconnectListener = () => this.onDisconnect();
   telemetryListener = (event) => this.receive(event.target.value);
 
-  async connect() {
+  async connect(fresh = false) {
     if (!navigator.bluetooth) throw new Error("Web Bluetooth is unavailable. On iPhone, open this page in Bluefy.");
+    if (fresh) this.releaseStaleDevice();
     if (!this.device) {
       this.setDevice(await navigator.bluetooth.requestDevice({
         filters: [{ services: [UUIDS.service] }, { namePrefix: "SPECTER" }],
@@ -71,6 +73,8 @@ class SpecterBLE {
   setDevice(device) {
     if (this.device) this.device.removeEventListener("gattserverdisconnected", this.disconnectListener);
     this.device = device;
+    this.reconnectAttempt = 0;
+    state.manualReconnect = false;
     this.device.addEventListener("gattserverdisconnected", this.disconnectListener);
     try { localStorage.setItem("specter-device-id", device.id); } catch {}
   }
@@ -86,11 +90,13 @@ class SpecterBLE {
       const service = await server.getPrimaryService(UUIDS.service);
       this.command = await service.getCharacteristic(UUIDS.command);
       this.telemetry = await service.getCharacteristic(UUIDS.telemetry);
+      this.telemetry.removeEventListener("characteristicvaluechanged", this.telemetryListener);
       await this.telemetry.startNotifications();
       this.telemetry.addEventListener("characteristicvaluechanged", this.telemetryListener);
       state.connected = true;
       state.authenticated = false;
       state.reconnecting = false;
+      state.manualReconnect = false;
       state.demo = false;
       this.reconnectAttempt = 0;
       clearInterval(demoTimer);
@@ -114,8 +120,26 @@ class SpecterBLE {
     this.reconnectTimer = null;
   }
 
+  releaseStaleDevice() {
+    this.clearReconnectTimer();
+    try { this.telemetry?.removeEventListener("characteristicvaluechanged", this.telemetryListener); } catch {}
+    if (this.device) this.device.removeEventListener("gattserverdisconnected", this.disconnectListener);
+    try { if (this.device?.gatt?.connected) this.device.gatt.disconnect(); } catch {}
+    this.device = null; this.command = null; this.telemetry = null; this.input = "";
+    this.reconnectAttempt = 0; this.initialScanSent = false;
+    state.connected = false; state.authenticated = false; state.reconnecting = false; state.manualReconnect = false;
+    try { localStorage.removeItem("specter-device-id"); } catch {}
+  }
+
   scheduleReconnect(delay) {
     if (!this.device || state.connected || this.connecting || this.reconnectTimer) return;
+    if (this.reconnectAttempt >= 3) {
+      state.reconnecting = false;
+      state.manualReconnect = true;
+      updateConnection();
+      toast("Bluefy needs a fresh device selection — tap Reconnect C5");
+      return;
+    }
     state.reconnecting = true;
     updateConnection();
     const wait = delay ?? Math.min(1000 * (2 ** this.reconnectAttempt), 15000);
@@ -149,7 +173,7 @@ class SpecterBLE {
   }
 
   foreground() {
-    if (this.device && !state.connected) {
+    if (this.device && !state.connected && !state.manualReconnect) {
       this.clearReconnectTimer();
       this.scheduleReconnect(0);
     }
@@ -159,6 +183,7 @@ class SpecterBLE {
     state.connected = false;
     state.authenticated = false;
     state.reconnecting = true;
+    state.manualReconnect = false;
     this.command = null;
     this.telemetry = null;
     updateConnection();
@@ -196,6 +221,10 @@ function updateConnection() {
     indicator.textContent = state.authenticated ? "C5 SECURE" : "C5 LOCKED";
     indicator.classList.add("online");
     $("#connectButton").textContent = "Connected";
+  } else if (state.manualReconnect) {
+    indicator.textContent = "TAP TO RECONNECT";
+    indicator.classList.remove("online");
+    $("#connectButton").textContent = "Reconnect C5";
   } else if (state.reconnecting) {
     indicator.textContent = "RECONNECTING";
     indicator.classList.remove("online");
@@ -224,7 +253,7 @@ async function authenticate(message) {
     await ble.send({ cmd: "auth", proof });
     $("#ownerState").textContent = "AUTHENTICATING SAVED OWNER";
   } else {
-    $("#ownerState").textContent = message.claim_window ? "PHYSICAL WINDOW OPEN" : "WAITING FOR PHYSICAL BUTTON";
+    $("#ownerState").textContent = message.claim_window ? "BOOT DETECTED — READY TO CLAIM" : "WAITING FOR PHYSICAL BUTTON";
     $("#ownerClaim").disabled = !message.claim_window;
     if (!$("#ownerDialog").open) $("#ownerDialog").showModal();
   }
@@ -240,6 +269,13 @@ async function finishAuthentication() {
 
 function handleTelemetry(message) {
   if (message.t === "security" || message.t === "claim_window") {
+    if (message.t === "claim_window") {
+      $("#ownerInstructions").textContent = "BOOT detected. The physical authorization window is open — tap Claim browser now.";
+      $("#ownerState").textContent = "BOOT DETECTED — READY TO CLAIM";
+      $("#ownerClaim").disabled = false;
+      toast("BOOT detected — tap Claim browser now");
+      try { navigator.vibrate?.([80, 50, 80]); } catch {}
+    }
     authenticate(message).catch((error) => toast(error.message));
   } else if (message.t === "authenticated") {
     finishAuthentication().catch((error) => toast(error.message));
@@ -828,7 +864,7 @@ function exportSession() {
   const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })); link.download = `specter-${new Date().toISOString().replaceAll(":", "-")}.json`; link.click(); URL.revokeObjectURL(link.href);
 }
 
-$("#connectButton").addEventListener("click", async () => { try { await ble.connect(); } catch (error) { toast(error.message); } });
+$("#connectButton").addEventListener("click", async () => { try { await ble.connect(state.manualReconnect); } catch (error) { toast(error.message); } });
 $("#demoButton").addEventListener("click", startDemo);
 $("#scanButton").addEventListener("click", async () => { if (state.connected) await ble.send({ cmd: "scan" }); else startDemo(); });
 $("#gpsButton").addEventListener("click", toggleGps);
