@@ -312,7 +312,7 @@ function handleTelemetry(message) {
     state.status.probe_kbps = message.kbps || 0; renderLab(); maybeCaptureMapSample(true);
   } else if (message.t === "configured") {
     $("#heartbeatEvidence").textContent = "CONFIGURED";
-    toast("Configuration stored on SPECTER");
+    toast(message.restarting ? "Configuration stored — C5 restarting" : "Configuration stored on SPECTER");
   } else if (message.t === "error") {
     toast(`C5: ${message.message || message.code}`);
   } else if (message.t === "ready" || message.t === "hello") {
@@ -856,7 +856,7 @@ $("#settingsForm").addEventListener("submit", async (event) => {
   if (!state.connected || !state.authenticated) return toast("Connect and authenticate before sending configuration");
   const form = new FormData(event.currentTarget);
   const command = { cmd: "configure", ssid: form.get("ssid"), password: form.get("password"), backup_ssid: form.get("backup_ssid"), backup_password: form.get("backup_password"), worker_url: form.get("worker_url"), device_id: form.get("device_id"), device_token: form.get("device_token"), alert_threshold: Number(form.get("alert_threshold")), heartbeat_seconds: Number(form.get("heartbeat_seconds")), sentinel_enabled: $("#sentinelToggle").checked };
-  try { await ble.send(command); event.currentTarget.elements.password.value = ""; event.currentTarget.elements.backup_password.value = ""; event.currentTarget.elements.device_token.value = ""; $("#settingsDialog").close(); toast("Configuration stored; reboot C5 to apply Wi-Fi changes"); }
+  try { await ble.send(command); event.currentTarget.elements.password.value = ""; event.currentTarget.elements.backup_password.value = ""; event.currentTarget.elements.device_token.value = ""; $("#settingsDialog").close(); toast("Configuration sent; C5 will restart and reconnect"); }
   catch (error) { toast(error.message); }
 });
 
