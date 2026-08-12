@@ -22,6 +22,7 @@ const state = {
   gpsAccuracy: null,
   lastGpsIds: new Set(),
   scan: { active: false, done: 0, total: 0, phase: "ready" },
+  pendingPowerPolicy: null,
   status: {
     wifi: false, gateway: false, internet: false, dns: false,
     rssi: -127, channel: 0, wifi_2g: 0, wifi_5g: 0,
@@ -344,6 +345,19 @@ function handleTelemetry(message) {
     if (typeof message.sentinel_enabled === "boolean") {
       $("#sentinelToggle").checked = message.sentinel_enabled;
     }
+    if (!$("#settingsDialog").open && typeof message.low_power_enabled === "boolean") {
+      const form = $("#settingsForm").elements;
+      form.low_power_enabled.checked = message.low_power_enabled;
+      form.quiet_start_hour.value = message.quiet_start_hour ?? 22;
+      form.quiet_end_hour.value = message.quiet_end_hour ?? 8;
+    }
+    if (state.pendingPowerPolicy &&
+        message.low_power_enabled === state.pendingPowerPolicy.enabled &&
+        Number(message.quiet_start_hour) === state.pendingPowerPolicy.start &&
+        Number(message.quiet_end_hour) === state.pendingPowerPolicy.end) {
+      state.pendingPowerPolicy = null;
+      toast("Night protection verified by SPECTER");
+    }
     renderAll();
     if (message.score >= 70 && previous < 70) addIncident(message);
     maybeCaptureMapSample();
@@ -536,6 +550,12 @@ function renderLab() {
   $("#linkLatency").textContent = hasData ? `${status.dns_ms || 0} / ${status.internet_ms || 0} ms` : "—";
   $("#probeSpeed").textContent = status.probe_kbps ? `${status.probe_kbps} kbps` : "NOT RUN";
   $("#chipTemperature").textContent = Number.isFinite(Number(status.temperature_c)) ? `${Number(status.temperature_c).toFixed(1)} °C internal` : "—";
+  const thermalStates = ["NORMAL", "THROTTLED", "RADIOS COOLING", "RESET REQUIRED"];
+  $("#thermalProtection").textContent = thermalStates[Number(status.thermal_state || 0)] || "UNKNOWN";
+  $("#powerPolicy").textContent = !hasData ? "WAITING" : !status.low_power_enabled ? "DISABLED" : status.low_power_active ? "SLEEP MODE" : "AWAKE";
+  const sweepSeconds = Number(status.scan_interval_seconds || 0);
+  $("#scanCadence").textContent = sweepSeconds ? (sweepSeconds >= 3600 ? `${sweepSeconds / 3600} HOUR` : `${Math.round(sweepSeconds / 60)} MIN`) : "—";
+  $("#clockState").textContent = status.time_synced ? "PA TIME SYNCED" : "SYNCING";
   $("#heapStats").textContent = status.free_heap ? `${Math.round(status.free_heap / 1024)} / ${Math.round((status.min_free_heap || 0) / 1024)} KB` : "—";
   const quality = Math.max(0, Math.min(100, (status.rssi + 100) * 2));
   $("#rssiMeter").style.width = `${quality}%`;
@@ -873,7 +893,13 @@ $("#scanButton").addEventListener("click", async () => { if (state.connected) aw
 $("#gpsButton").addEventListener("click", toggleGps);
 $("#heatmapNetwork").addEventListener("change", renderTrail);
 $("#exportButton").addEventListener("click", exportSession);
-$("#settingsButton").addEventListener("click", () => $("#settingsDialog").showModal());
+$("#settingsButton").addEventListener("click", () => {
+  const form = $("#settingsForm").elements;
+  if (typeof state.status.low_power_enabled === "boolean") form.low_power_enabled.checked = state.status.low_power_enabled;
+  form.quiet_start_hour.value = state.status.quiet_start_hour ?? 22;
+  form.quiet_end_hour.value = state.status.quiet_end_hour ?? 8;
+  $("#settingsDialog").showModal();
+});
 $("#setupScanButton").addEventListener("click", async () => { if (!state.authenticated) return toast("Authenticate this browser first"); state.setupAps.clear(); await ble.send({ cmd: "setup_scan" }); });
 $("#ownerClaim").addEventListener("click", async () => { const key = bytesToHex(crypto.getRandomValues(new Uint8Array(32))); localStorage.setItem("specter-owner-key", key); $("#ownerState").textContent = "CLAIMING OWNER SLOT"; try { await ble.send({ cmd: "claim", owner_key: key }); } catch (error) { localStorage.removeItem("specter-owner-key"); toast(error.message); } });
 $("#ownerCancel").addEventListener("click", () => { ble.clearReconnectTimer(); if (ble.device?.gatt?.connected) ble.device.gatt.disconnect(); $("#ownerDialog").close(); });
@@ -894,8 +920,16 @@ $("#settingsForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!state.connected || !state.authenticated) return toast("Connect and authenticate before sending configuration");
   const form = new FormData(event.currentTarget);
-  const command = { cmd: "configure", ssid: form.get("ssid"), password: form.get("password"), backup_ssid: form.get("backup_ssid"), backup_password: form.get("backup_password"), worker_url: form.get("worker_url"), device_id: form.get("device_id"), device_token: form.get("device_token"), alert_threshold: Number(form.get("alert_threshold")), heartbeat_seconds: Number(form.get("heartbeat_seconds")), sentinel_enabled: $("#sentinelToggle").checked };
-  try { await ble.send(command); event.currentTarget.elements.password.value = ""; event.currentTarget.elements.backup_password.value = ""; event.currentTarget.elements.device_token.value = ""; $("#settingsDialog").close(); toast("Configuration sent; C5 will restart and reconnect"); }
+  const lowPowerEnabled = form.get("low_power_enabled") === "on";
+  const quietStart = Number(form.get("quiet_start_hour"));
+  const quietEnd = Number(form.get("quiet_end_hour"));
+  const command = { cmd: "configure", alert_threshold: Number(form.get("alert_threshold")), heartbeat_seconds: Number(form.get("heartbeat_seconds")), sentinel_enabled: $("#sentinelToggle").checked, low_power_enabled: lowPowerEnabled, quiet_start_hour: quietStart, quiet_end_hour: quietEnd };
+  if (form.get("ssid")) Object.assign(command, { ssid: form.get("ssid"), password: form.get("password"), backup_ssid: form.get("backup_ssid"), backup_password: form.get("backup_password") });
+  if (form.get("worker_url")) command.worker_url = form.get("worker_url");
+  if (form.get("device_id")) command.device_id = form.get("device_id");
+  if (form.get("device_token")) command.device_token = form.get("device_token");
+  state.pendingPowerPolicy = { enabled: lowPowerEnabled, start: quietStart, end: quietEnd };
+  try { await ble.send(command); event.currentTarget.elements.password.value = ""; event.currentTarget.elements.backup_password.value = ""; event.currentTarget.elements.device_token.value = ""; $("#settingsDialog").close(); toast(command.ssid ? "Configuration sent; C5 will restart and reconnect" : "Configuration sent; waiting for device verification"); }
   catch (error) { toast(error.message); }
 });
 
